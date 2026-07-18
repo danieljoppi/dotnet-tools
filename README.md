@@ -35,8 +35,10 @@ references). Compared to `ImmutableArray`:
   most once. Untouched structure is shared between the old and new version (structural sharing),
   so old snapshots stay valid for free.
 - **Array-speed reads** — an index read is three array indexings, no tree traversal.
-- **Tunable chunk size** (`EmptyWithChunkRows`) — smaller chunks minimize copy-on-write volume for
-  sparse random batches over huge tables; larger chunks favor dense updates and scans.
+- **Adaptive chunk size** — `SnapshotTable` picks large (~64 KB) chunks for tables up to a few
+  million rows (dense batches: fewer, larger copies win) and small (~4 KB) chunks for huge tables
+  (sparse batches: 20k random updates over 100M rows copy ~65 MB instead of ~880 MB). Override
+  with `SnapshotTableOptions.ChunkRows` / `EmptyWithChunkRows` if your batch pattern differs.
 
 ### `SnapshotTable<TKey, TValue>`
 
@@ -59,8 +61,8 @@ The cache class for the "big table + periodic batch refresh" pattern:
 ```csharp
 var customers = new SnapshotTable<long, Customer>(new SnapshotTableOptions<long>
 {
-    CapacityHint = 100_000_000,   // sizes the sharded index
-    // ChunkRows = 128,           // optional: tune row-chunk size for your batch pattern
+    CapacityHint = 100_000_000,   // sizes the sharded index and picks the chunk size
+    // ChunkRows = 256,           // optional: override the adaptive chunk-size default
 });
 customers.Reset(LoadAllFromDatabase());                    // initial full load
 

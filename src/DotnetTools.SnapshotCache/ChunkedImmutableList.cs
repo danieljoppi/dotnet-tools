@@ -63,6 +63,14 @@ public sealed class ChunkedImmutableList<T> : IReadOnlyList<T>
 
     public static readonly ChunkedImmutableList<T> Empty = new([], 0, DefaultShift);
 
+    /// <summary>An empty list whose chunks target <paramref name="targetChunkBytes"/> of payload
+    /// (clamped to the LOH-safe maximum).</summary>
+    internal static ChunkedImmutableList<T> EmptyWithTargetBytes(int targetChunkBytes)
+    {
+        int shift = ShiftForTargetBytes(targetChunkBytes);
+        return shift == DefaultShift ? Empty : new ChunkedImmutableList<T>([], 0, shift);
+    }
+
     /// <summary>An empty list whose chunks hold <paramref name="chunkRows"/> elements (a power of
     /// two). Lists and builders derived from it keep that chunk size.</summary>
     public static ChunkedImmutableList<T> EmptyWithChunkRows(int chunkRows)
