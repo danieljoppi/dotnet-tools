@@ -118,6 +118,51 @@ The structure itself is LOH-free by construction at any row count up to `int.Max
 (~4 KB), spine blocks (8 KB), index shards (a few KB each, ~500k of them), directory blocks
 (8 KB), and all copy-on-write bookkeeping (bitsets) sit far below the 85,000-byte threshold.
 
+## 5. Overall memory analysis: steady-state footprint and where it lives
+
+Speed and per-batch allocation only tell half the story — this measures what each structure
+*costs to keep resident*, and how much of that sits on the Large Object Heap. Method: build the
+structure holding N `long → long` rows in a fresh process, force a full compacting GC (including
+explicit LOH compaction), and report live heap deltas. Raw data: 16 B/row. CSV:
+[`results/raw/memory-footprint.csv`](results/raw/memory-footprint.csv), harness: `--memory-profile`.
+
+![Memory footprint](results/charts/memory-footprint.png)
+
+| Structure | 1M rows | 10M rows | 100M rows | On LOH | Keyed reads (§2) | 30 s refresh (§1/§4) |
+|---|---:|---:|---:|---|---:|---|
+| ImmutableArray | 16 MiB (1.0×) | 153 MiB (1.0×) | — | **100%** | positional only | O(N) LOH copy |
+| Dictionary | 37 MiB (2.4×) | 320 MiB (2.1×) | 5.01 GiB (3.4×)¹ | **~100%** | ~14 ns | O(N) LOH rebuild |
+| FrozenDictionary | 55 MiB (3.6×) | 459 MiB (3.0×) | 2.61 GiB (1.75×) | **~100%** | ~29 ns | O(N) LOH rebuild, slowest |
+| **SnapshotTable** | 54 MiB (3.6×) | 507 MiB (3.3×) | 4.84 GiB (3.25×) | **0%** | ~68 ns | **O(batch), no LOH** |
+| ImmutableList | 53 MiB (3.5×) | 534 MiB (3.5×) | — | 0% | no key index² | O(touched nodes) |
+| ConcurrentDictionary | 56 MiB (3.7×) | 549 MiB (3.6×) | — | partial (buckets) | ~fast | per-key only, no snapshots |
+| ImmutableDictionary | 61 MiB (4.0×) | 610 MiB (4.0×) | — | 0% | ~585 ns | O(B log N) |
+
+¹ `Dictionary` built from an enumerable (no count) grows by prime-doubling and lands over-sized —
+at 100M rows its capacity overshoot alone wastes ~1.5 GiB. Pre-sizing fixes that but does not get
+it off the LOH.
+² `ImmutableList` needs a separate key→index map for keyed access; add one `Dictionary` row above
+to its cost for a fair keyed-workload comparison (which also puts it on the LOH).
+
+**What the overall picture says:**
+
+- **Every structure with dictionary-class read speed except `SnapshotTable` keeps its bulk on the
+  LOH** — `Dictionary`, `FrozenDictionary`, `ConcurrentDictionary` (buckets), `ImmutableArray`.
+  Their steady-state *size* is fine; the problem is that their refresh path reallocates those
+  LOH structures every cycle, which is what fragments the LOH and drives Gen2/full GCs.
+- **The LOH-free BCL options pay for it in reads and per-element overhead**:
+  `ImmutableDictionary`/`ImmutableList` are 3.5-4× raw with ~9× slower lookups.
+- **`FrozenDictionary` is the most compact keyed structure at scale** (1.75× raw at 100M — its
+  arrays are exactly sized). If a table refreshes rarely and a 100%-LOH resident footprint is
+  acceptable, it is the best read-mostly choice; its disqualifier here is the 30-second full
+  rebuild (~2.6-5 GiB of LOH churn per cycle at 100M).
+- **`SnapshotTable` sits at 3.25-3.6× raw — the same band as the BCL keyed structures — with 0%
+  on the LOH at every scale**, and it is the only one whose refresh cost doesn't scale with the
+  table. Most of its footprint is the sharded key→row index (~35 B/row of `Dictionary` entries);
+  the row store itself is only ~1.05× raw. A denser custom shard (open addressing, int-only) could
+  cut total to ~2× raw if memory ever becomes the binding constraint — tracked as a possible
+  follow-up, not needed to meet the current budget (4.84 GiB for 100M rows fits comfortably).
+
 ## Reproducing
 
 ```bash
@@ -129,4 +174,7 @@ dotnet run -c Release --project benchmarks/DotnetTools.SnapshotCache.Benchmarks 
 
 # regenerate the charts from the artifacts:
 python3 benchmarks/plot_results.py
+
+# steady-state memory profile (one structure per process):
+dotnet benchmarks/DotnetTools.SnapshotCache.Benchmarks/bin/Release/net10.0/DotnetTools.SnapshotCache.Benchmarks.dll --memory-profile SnapshotTable 10000000
 ```

@@ -130,3 +130,61 @@ barh(load_rows, "mean_ms",
      "Initial full load of 1,000,000 rows — time",
      "mean time per load (ms, log scale) — shorter is better",
      "initial-load-time.png", ms, log=True)
+
+
+# --- Steady-state memory footprint (reads results/raw/memory-footprint.csv if present) ---
+def plot_memory_footprint():
+    src = Path("benchmarks/results/raw/memory-footprint.csv")
+    if not src.exists():
+        src = Path("results/raw/memory-footprint.csv")
+    if not src.exists():
+        print("memory-footprint.csv not found; skipping memory chart")
+        return
+    LOH_COLOR = "#eb6834"  # categorical slot 6 (orange): the LOH portion
+    SOH_COLOR = "#2a78d6"  # categorical slot 1 (blue): small-object heap portion
+    rows_target = 10_000_000
+    raw_bytes = rows_target * 16  # KeyValuePair<long,long>
+    entries = []
+    with src.open() as f:
+        for row in csv.DictReader(f):
+            if int(row["rows"]) == rows_target and row["heap_bytes"] != "FAILED":
+                heap = int(row["heap_bytes"])
+                loh = int(row["loh_bytes"])
+                entries.append((row["structure"], (heap - loh) / 2**20, loh / 2**20, heap / 2**20))
+    entries.sort(key=lambda e: e[3])
+    labels = [e[0] for e in entries]
+    soh = [e[1] for e in entries]
+    loh = [e[2] for e in entries]
+    totals = [e[3] for e in entries]
+
+    fig, ax = plt.subplots(figsize=(9, 0.62 * len(entries) + 2.0), dpi=160)
+    fig.patch.set_facecolor(SURFACE)
+    ax.set_facecolor(SURFACE)
+    ax.barh(labels, soh, color=SOH_COLOR, height=0.62, zorder=3, label="Small-object heap")
+    ax.barh(labels, loh, left=[s + 0.8 for s in soh], color=LOH_COLOR, height=0.62, zorder=3,
+            label="Large Object Heap", edgecolor=SURFACE, linewidth=1.5)
+    ax.xaxis.grid(True, color=GRID, linewidth=0.8, zorder=0)
+    ax.set_axisbelow(True)
+    for spine in ("top", "right", "left"):
+        ax.spines[spine].set_visible(False)
+    ax.spines["bottom"].set_color(GRID)
+    ax.tick_params(colors=MUTED, labelsize=9)
+    for tick in ax.get_yticklabels():
+        tick.set_color(INK)
+        tick.set_fontsize(10)
+    ax.set_xlabel("resident MiB for 10,000,000 rows (16 B raw each) — shorter is better", color=MUTED, fontsize=9)
+    ax.set_title("Steady-state memory by structure — small-object vs Large Object Heap",
+                 color=INK, fontsize=12, loc="left", pad=14, fontweight="bold")
+    span = max(totals)
+    for y, total in enumerate(totals):
+        ax.text(total + span * 0.015, y, f"{total:,.0f} MiB  ({total * 2**20 / raw_bytes:.1f}x raw)",
+                va="center", ha="left", color=INK, fontsize=9)
+    ax.set_xlim(right=span * 1.32)
+    ax.legend(loc="lower right", frameon=False, fontsize=9, labelcolor=INK)
+    fig.tight_layout()
+    fig.savefig(OUT / "memory-footprint.png", facecolor=SURFACE, bbox_inches="tight")
+    plt.close(fig)
+    print(f"wrote {OUT / 'memory-footprint.png'}")
+
+
+plot_memory_footprint()
