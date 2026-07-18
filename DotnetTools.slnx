@@ -1,0 +1,11 @@
+<Solution>
+  <Folder Name="/benchmarks/">
+    <Project Path="benchmarks/DotnetTools.SnapshotCache.Benchmarks/DotnetTools.SnapshotCache.Benchmarks.csproj" />
+  </Folder>
+  <Folder Name="/src/">
+    <Project Path="src/DotnetTools.SnapshotCache/DotnetTools.SnapshotCache.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/DotnetTools.SnapshotCache.Tests/DotnetTools.SnapshotCache.Tests.csproj" />
+  </Folder>
+</Solution>
