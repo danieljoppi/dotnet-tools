@@ -107,13 +107,19 @@ public class PerformanceTests
     [Fact]
     public void BatchUpdate_IsFasterThanFullRebuild()
     {
-        // Use 2M rows here: rebuild cost is O(N) while ApplyChanges is O(batch), so a larger table
-        // widens the gap and keeps the assertion stable on fast CI runners where a 1M Dictionary
-        // rebuild is only a few milliseconds.
-        const int size = 2 * TableSize;
+        // Rebuild cost is O(N) while ApplyChanges is O(batch), so the gap this test guards is only
+        // unambiguous when the table dwarfs the batch's chunk reach. At 1-2M rows a uniformly
+        // random 5k batch touches most 4 KB chunks and the margin gets runner-dependent; at 8M the
+        // expected ratio is ~5x, stable even on fast CI machines.
+        const int size = 8 * TableSize;
         var table = new SnapshotTable<long, long>(capacityHint: size);
         table.Reset(Enumerable.Range(0, size).Select(i => KeyValuePair.Create((long)i, (long)i)));
-        var batch = BuildBatch();
+        var rng = new Random(42);
+        var batch = Enumerable.Range(0, BatchSize)
+            .Select(_ => (long)rng.Next(size))
+            .Distinct()
+            .Select(k => KeyValuePair.Create(k, -k))
+            .ToArray();
         var plain = new Dictionary<long, long>(
             Enumerable.Range(0, size).Select(i => KeyValuePair.Create((long)i, (long)i)));
 
