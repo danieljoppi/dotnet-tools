@@ -1,4 +1,0 @@
-structure,rows,heap_bytes,loh_bytes
-SnapshotTable,1000000,36131776,0
-SnapshotTable,10000000,364693256,0
-SnapshotTable,100000000,3634194648,0
