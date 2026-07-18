@@ -88,6 +88,32 @@ Load is `SnapshotTable`'s worst phase (shard dictionaries grow by doubling), but
 at startup; the transient allocation is collected immediately after. If startup is critical, a
 future `Reset` overload taking a count hint can pre-size shards.
 
+## 4. The target workload: 100,000,000 rows, 20,000 changes every 30 seconds
+
+Run end-to-end with the console harness (`--largescale`), workstation GC, 4-core Linux VM, while
+two reader threads continuously issued point lookups. Batch mix: 80% updates of random existing
+rows, 20% inserts of new rows. Full output: [`results/raw/largescale-100m.txt`](results/raw/largescale-100m.txt).
+
+| Metric | Measured | Budget / context |
+|---|---:|---|
+| Initial load (one-time) | 72.5 s (1.4M rows/s) | startup only |
+| Heap for 100M rows + index | 4.84 GiB | `long → long` rows |
+| **LOH size after load** | **0.0 MiB** | the entire structure is small-object |
+| Apply 20k-change batch | median 870 ms, max 1,264 ms | 30,000 ms budget (~3%) |
+| Allocation per batch | ~90 MiB, Gen0/Gen1 only | vs ~4.8 GiB for any full-rebuild approach |
+| GC over 10 cycles | Gen0=55, Gen1=54, Gen2=1 | no LOH-triggered full GCs |
+| **LOH growth over 10 cycles** | **0.0 MiB** | the headline guarantee |
+| Concurrent reads during refreshes | 1.92 M lookups/s (2 readers) | readers never block |
+
+At this scale no BCL alternative completes the workload cleanly: `ImmutableArray` would copy a
+1.6 GB LOH array per batch, a `Dictionary`/`FrozenDictionary` rebuild would allocate ~5 GiB of
+LOH-resident structures every 30 seconds, and `ImmutableList`/`ImmutableDictionary` would need
+roughly 3-5x the memory and ~11x slower reads.
+
+The structure itself is LOH-free by construction at any row count up to `int.MaxValue`: row chunks
+(~4 KB), spine blocks (8 KB), index shards (a few KB each, ~500k of them), directory blocks
+(8 KB), and all copy-on-write bookkeeping (bitsets) sit far below the 85,000-byte threshold.
+
 ## Reproducing
 
 ```bash

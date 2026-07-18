@@ -107,10 +107,15 @@ public class PerformanceTests
     [Fact]
     public void BatchUpdate_IsFasterThanFullRebuild()
     {
-        var table = BuildTable();
+        // Use 2M rows here: rebuild cost is O(N) while ApplyChanges is O(batch), so a larger table
+        // widens the gap and keeps the assertion stable on fast CI runners where a 1M Dictionary
+        // rebuild is only a few milliseconds.
+        const int size = 2 * TableSize;
+        var table = new SnapshotTable<long, long>(capacityHint: size);
+        table.Reset(Enumerable.Range(0, size).Select(i => KeyValuePair.Create((long)i, (long)i)));
         var batch = BuildBatch();
         var plain = new Dictionary<long, long>(
-            Enumerable.Range(0, TableSize).Select(i => KeyValuePair.Create((long)i, (long)i)));
+            Enumerable.Range(0, size).Select(i => KeyValuePair.Create((long)i, (long)i)));
 
         // Warm-up both paths.
         table.ApplyChanges(batch);
@@ -181,13 +186,17 @@ public class PerformanceTests
             ChunkedImmutableList<KeyValuePair<long, long>> x,
             ChunkedImmutableList<KeyValuePair<long, long>> y)
         {
-            var fx = typeof(ChunkedImmutableList<KeyValuePair<long, long>>)
-                .GetField("_chunks", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!;
-            var cx = (KeyValuePair<long, long>[][])fx.GetValue(x)!;
-            var cy = (KeyValuePair<long, long>[][])fx.GetValue(y)!;
-            for (int i = 0; i < Math.Min(cx.Length, cy.Length); i++)
+            var bx = x.UnsafeBlocks;
+            var by = y.UnsafeBlocks;
+            for (int b = 0; b < Math.Min(bx.Length, by.Length); b++)
             {
-                yield return (cx[i], cy[i]);
+                for (int s = 0; s < Math.Min(bx[b].Length, by[b].Length); s++)
+                {
+                    if (bx[b][s] is not null || by[b][s] is not null)
+                    {
+                        yield return (bx[b][s], by[b][s]);
+                    }
+                }
             }
         }
     }

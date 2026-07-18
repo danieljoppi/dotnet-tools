@@ -23,15 +23,20 @@ Two classes in [`src/DotnetTools.SnapshotCache`](src/DotnetTools.SnapshotCache):
 
 ### `ChunkedImmutableList<T>`
 
-An immutable (persistent) list stored as an array of fixed-size **chunks**, each sized to stay below
-the 85 KB LOH threshold (≤ 64 KB of data, ≤ 8192 elements). Compared to `ImmutableArray`:
+An immutable (persistent) list stored as small fixed-size **chunks** (default ~4 KB of data,
+tunable per instance) reached through a **two-level spine** (8 KB spine blocks of 1024 chunk
+references). Compared to `ImmutableArray`:
 
-- **No LOH allocations, ever** — a 10-million-row list is ~1200 small arrays, not one 80 MB array.
-- **O(chunk) updates instead of O(N)** — `SetItem` copies the spine + one chunk; a **batch** through
-  `ToBuilder()` copies each *touched* chunk at most once. Untouched chunks are shared between the
-  old and new version (structural sharing), so old snapshots stay valid for free.
-- **Array-speed reads** — an index read is two array indexings (`chunks[i >> shift][i & mask]`),
-  no tree traversal.
+- **No LOH allocations at any size** — chunks, spine blocks, the top spine, and all builder
+  bookkeeping (ownership bitsets) stay below the 85 KB threshold up to `int.MaxValue` elements.
+  A 100-million-row list is ~390k small arrays, not one 1.6 GB array.
+- **O(touched chunks) updates instead of O(N)** — `SetItem` copies one chunk + one spine block +
+  the top spine; a **batch** through `ToBuilder()` copies each touched chunk and spine block at
+  most once. Untouched structure is shared between the old and new version (structural sharing),
+  so old snapshots stay valid for free.
+- **Array-speed reads** — an index read is three array indexings, no tree traversal.
+- **Tunable chunk size** (`EmptyWithChunkRows`) — smaller chunks minimize copy-on-write volume for
+  sparse random batches over huge tables; larger chunks favor dense updates and scans.
 
 ### `SnapshotTable<TKey, TValue>`
 
@@ -42,16 +47,21 @@ The cache class for the "big table + periodic batch refresh" pattern:
   over it while updates keep landing.
 - **Atomic batch updates.** `ApplyChanges(upserts, removes)` builds the next snapshot with
   copy-on-write at two granularities — row chunks (via `ChunkedImmutableList`) and a **sharded hash
-  index** (hundreds of small `Dictionary<TKey,int>` shards, each below the LOH threshold; only
-  shards containing changed keys are cloned). The new snapshot is published with one atomic
-  reference swap: readers see the whole batch or none of it.
-- **Cost proportional to the batch, not the table.** A 5,000-change batch over 1,000,000 rows
-  copies ~5k chunk/shard structures instead of a million entries — and none of it touches the LOH.
+  index**: up to ~500k small `Dictionary<TKey,int>` shards reached through a two-level directory,
+  every piece below the LOH threshold. Only shards containing *inserted or removed* keys (and
+  their directory blocks) are cloned; in-place value updates never touch the index at all.
+- **Cost proportional to the batch, not the table.** A 20,000-change batch over 100,000,000 rows
+  copies ~90 MB of small-object chunks/shards instead of gigabytes — measured: 0.87 s median per
+  batch, zero LOH growth (see `benchmarks/RESULTS.md`), against a 30-second budget.
 - **Removals are O(1)** via swap-remove (last row moves into the vacated slot; iteration order is
   not stable across removes — irrelevant for keyed cache tables).
 
 ```csharp
-var customers = new SnapshotTable<long, Customer>(capacityHint: 3_000_000);
+var customers = new SnapshotTable<long, Customer>(new SnapshotTableOptions<long>
+{
+    CapacityHint = 100_000_000,   // sizes the sharded index
+    // ChunkRows = 128,           // optional: tune row-chunk size for your batch pattern
+});
 customers.Reset(LoadAllFromDatabase());                    // initial full load
 
 // every 30 seconds:
@@ -109,7 +119,7 @@ Not recommended, and not built here, deliberately:
 ```
 src/DotnetTools.SnapshotCache/           the library (net10.0, zero dependencies)
 tests/DotnetTools.SnapshotCache.Tests/   xUnit: correctness, fuzz-vs-model, snapshot isolation,
-                                         concurrency stress, LOH-size guarantees (32 tests)
+                                         concurrency stress, LOH + performance guardrails (41 tests)
 benchmarks/DotnetTools.SnapshotCache.Benchmarks/   BenchmarkDotNet comparisons
 ```
 
@@ -134,8 +144,10 @@ and `ReadBenchmarks` (10k random point lookups) — each against `ImmutableArray
 
 ## Guarantees & limits
 
-- Chunk arrays and index shards stay below the 85,000-byte LOH threshold by construction (tested).
-  The chunk *spine* (array of chunk references) stays small-object up to ~87M elements per table.
+- Chunk arrays, spine blocks, index shards, directory blocks, and per-batch bookkeeping all stay
+  below the 85,000-byte LOH threshold by construction (tested), up to `int.MaxValue` rows.
+  Validated with a real 100M-row / 20k-batch run: zero LOH growth, zero Gen2 collections
+  (`benchmarks/RESULTS.md`).
 - One writer at a time (writers serialize on a lock; readers never block). Designed for the
   single-refresher pattern, not for high-frequency per-key contention.
 - Iteration order is insertion order until a remove occurs (swap-remove); treat enumeration as

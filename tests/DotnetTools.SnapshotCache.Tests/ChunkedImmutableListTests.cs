@@ -5,7 +5,7 @@ namespace DotnetTools.SnapshotCache.Tests;
 
 public class ChunkedImmutableListTests
 {
-    private static readonly int Chunk = ChunkedImmutableList<int>.ChunkCapacity;
+    private static readonly int Chunk = ChunkedImmutableList<int>.DefaultChunkRows;
 
     [Fact]
     public void Empty_HasZeroCount()
@@ -162,10 +162,10 @@ public class ChunkedImmutableListTests
 
     private static void AssertChunkIsLohSafe<T>()
     {
-        long chunkBytes = (long)ChunkedImmutableList<T>.ChunkCapacity * Unsafe.SizeOf<T>();
+        long chunkBytes = (long)ChunkedImmutableList<T>.DefaultChunkRows * Unsafe.SizeOf<T>();
         Assert.True(chunkBytes < 85_000,
-            $"{typeof(T).Name}: chunk of {ChunkedImmutableList<T>.ChunkCapacity} elements = {chunkBytes} bytes");
-        Assert.True(ChunkedImmutableList<T>.ChunkCapacity >= 1);
+            $"{typeof(T).Name}: chunk of {ChunkedImmutableList<T>.DefaultChunkRows} elements = {chunkBytes} bytes");
+        Assert.True(ChunkedImmutableList<T>.DefaultChunkRows >= 1);
     }
 
     [Fact]
