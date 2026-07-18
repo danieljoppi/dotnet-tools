@@ -1,0 +1,17 @@
+# Soak: 20,000,000 rows, 400 cycles of 20,000 changes (70% update / 15% insert / 15% remove), 2 readers, 5 held snapshots
+GC mode: Workstation
+Parallel load: 1.7 s
+Baseline: heap 696 MiB, LOH 0.0 MiB
+
+cycle 100: heap 1013 MiB, LOH 2.0 MiB, rows 20,003,422, apply p50 109 ms
+cycle 200: heap 1014 MiB, LOH 4.0 MiB, rows 20,013,514, apply p50 111 ms
+cycle 300: heap 1014 MiB, LOH 4.0 MiB, rows 20,029,557, apply p50 111 ms
+cycle 400: heap 1018 MiB, LOH 8.0 MiB, rows 20,052,245, apply p50 112 ms
+
+Soak wall time: 1.0 min, apply p50 112 ms / max 364 ms
+Reads sustained: 1.63 M lookups/s
+Gen2 collections during soak: 87 (excluding forced checkpoints)
+Heap: 696 → 696 MiB (drift +1 MiB)
+LOH:  0.0 → 0.0 MiB (growth 0.0 MiB)
+
+RESULT: PASS (LOH flat: True, heap drift within 67 MiB: True)

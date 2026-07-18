@@ -7,6 +7,15 @@ if (args.Length > 2 && args[0] == "--memory-profile")
     return;
 }
 
+if (args.Length > 0 && args[0] == "--soak")
+{
+    int soakRows = args.Length > 1 ? int.Parse(args[1]) : 20_000_000;
+    int soakCycles = args.Length > 2 ? int.Parse(args[2]) : 400;
+    int soakBatch = args.Length > 3 ? int.Parse(args[3]) : 20_000;
+    SoakValidation.Run(soakRows, soakCycles, soakBatch);
+    return;
+}
+
 if (args.Length > 0 && args[0] == "--largescale")
 {
     int rows = args.Length > 1 ? int.Parse(args[1]) : 100_000_000;
