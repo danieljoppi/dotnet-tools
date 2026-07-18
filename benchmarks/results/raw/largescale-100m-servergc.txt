@@ -1,0 +1,3 @@
+# Large-scale validation: 100,000,000 rows, 20,000 changes/cycle, 10 cycles
+GC mode: Server, process: 4 cores
+

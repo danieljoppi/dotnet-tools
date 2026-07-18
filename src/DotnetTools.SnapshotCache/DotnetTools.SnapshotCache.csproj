@@ -1,12 +1,29 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <LangVersion>latest</LangVersion>
-    <Description>Low-allocation, LOH-friendly snapshot collections for large in-memory table caches.</Description>
+    <Description>Low-allocation, LOH-free snapshot collections for large in-memory table caches: wait-free reads, atomic batch refreshes with copy-on-write cost proportional to the batch, secondary indexes, and change notifications. Validated at 100M rows with zero Large Object Heap usage.</Description>
+    <PackageId>DotnetTools.SnapshotCache</PackageId>
+    <Version>0.2.0</Version>
+    <Authors>Daniel Henrique Joppi</Authors>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageProjectUrl>https://github.com/danieljoppi/dotnet-tools</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/danieljoppi/dotnet-tools</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageTags>cache;snapshot;immutable;loh;gc;performance;in-memory;table</PackageTags>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <NoWarn>$(NoWarn);CS1591</NoWarn>
   </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="../../README.md" Pack="true" PackagePath="/" />
+  </ItemGroup>
 
   <ItemGroup>
     <InternalsVisibleTo Include="DotnetTools.SnapshotCache.Tests" />

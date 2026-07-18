@@ -57,6 +57,15 @@ The cache class for the "big table + periodic batch refresh" pattern:
   batch, zero LOH growth (see `benchmarks/RESULTS.md`), against a 30-second budget.
 - **Removals are O(1)** via swap-remove (last row moves into the vacated slot; iteration order is
   not stable across removes — irrelevant for keyed cache tables).
+- **Compact index shards.** The key → row index uses custom open-addressing shards
+  (~22 B/entry vs ~39 B/entry for `Dictionary<TKey,int>`), cutting total footprint from ~3.3× to
+  ~2.3× the raw data at 100M rows.
+- **Secondary indexes** (`CreateIndex(selector)`) maintained atomically inside every batch —
+  query customers by region/status/tier from any snapshot, consistent with that snapshot.
+- **Change notifications** — `SnapshotChanged` fires after each atomic swap with the upserted and
+  removed keys, so downstream caches or projections can react without diffing.
+- **Parallel initial load** — `ResetParallel` builds the index on all cores for unique-key streams
+  (duplicate keys are detected and rejected).
 
 ```csharp
 var customers = new SnapshotTable<long, Customer>(new SnapshotTableOptions<long>
@@ -64,7 +73,11 @@ var customers = new SnapshotTable<long, Customer>(new SnapshotTableOptions<long>
     CapacityHint = 100_000_000,   // sizes the sharded index and picks the chunk size
     // ChunkRows = 256,           // optional: override the adaptive chunk-size default
 });
-customers.Reset(LoadAllFromDatabase());                    // initial full load
+var byRegion = customers.CreateIndex((id, c) => c.Region);  // optional secondary index
+customers.ResetParallel(LoadAllFromDatabase());            // initial full load, all cores
+
+customers.SnapshotChanged += change =>                     // optional change feed
+    InvalidateDownstream(change.UpsertedKeys, change.RemovedKeys);
 
 // every 30 seconds:
 customers.ApplyChanges(upserts: changedRows, removes: deletedIds);  // O(batch), atomic
@@ -72,10 +85,14 @@ customers.ApplyChanges(upserts: changedRows, removes: deletedIds);  // O(batch),
 // hot path, any thread, no locks:
 if (customers.TryGetValue(id, out var customer)) { ... }
 
-// consistent multi-read / full scan:
+// consistent multi-read / full scan / secondary index query:
 var snap = customers.GetSnapshot();
 foreach (var (id, customer) in snap) { ... }               // never sees a half-applied batch
+foreach (var (id, customer) in snap.LookupRows(byRegion, "BR")) { ... }
 ```
+
+Install from the packaged build (`dotnet pack src/DotnetTools.SnapshotCache`; CI uploads the
+`.nupkg` as an artifact on every merge request).
 
 ## Do you need this, or does something off-the-shelf fit?
 

@@ -22,7 +22,7 @@ public static class LargeScaleValidation
         var table = new SnapshotTable<long, long>(new SnapshotTableOptions<long> { CapacityHint = rows });
 
         var sw = Stopwatch.StartNew();
-        table.Reset(GenerateRows(rows));
+        table.ResetParallel(GenerateRows(rows)); // unique synthetic keys → parallel index build
         sw.Stop();
         ForceFullGc();
         var afterLoad = GC.GetGCMemoryInfo(GCKind.FullBlocking);
