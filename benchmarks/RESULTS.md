@@ -138,18 +138,23 @@ explicit LOH compaction), and report live heap deltas. Raw data: 16 B/row. CSV:
 
 | Structure | 1M rows | 10M rows | 100M rows | On LOH | Keyed reads (§2) | 30 s refresh (§1/§4) |
 |---|---:|---:|---:|---|---:|---|
-| ImmutableArray | 16 MiB (1.0×) | 153 MiB (1.0×) | — | **100%** | positional only | O(N) LOH copy |
-| Dictionary | 37 MiB (2.4×) | 320 MiB (2.1×) | 5.01 GiB (3.4×)¹ | **~100%** | ~14 ns | O(N) LOH rebuild |
+| ImmutableArray | 16 MiB (1.0×) | 153 MiB (1.0×) | 1.49 GiB (1.0×) | **100%** | positional only | O(N) LOH copy |
+| Dictionary | 37 MiB (2.4×) | 320 MiB (2.1×) | 5.01 GiB (3.4×)² | **~100%** | ~14 ns | O(N) LOH rebuild |
 | FrozenDictionary | 55 MiB (3.6×) | 459 MiB (3.0×) | 2.61 GiB (1.75×) | **~100%** | ~29 ns | O(N) LOH rebuild, slowest |
 | **SnapshotTable** | **36 MiB (2.26×)** | **365 MiB (2.28×)** | **3.38 GiB (2.26×)** | **0%** | ~70 ns | **O(batch), no LOH** |
-| ImmutableList | 53 MiB (3.5×) | 534 MiB (3.5×) | — | 0% | no key index² | O(touched nodes) |
-| ConcurrentDictionary | 56 MiB (3.7×) | 549 MiB (3.6×) | — | partial (buckets) | ~fast | per-key only, no snapshots |
-| ImmutableDictionary | 61 MiB (4.0×) | 610 MiB (4.0×) | — | 0% | ~585 ns | O(B log N) |
+| ImmutableList | 53 MiB (3.5×) | 534 MiB (3.5×) | 5.22 GiB (3.5×) | 0% | no key index³ | O(touched nodes) |
+| ConcurrentDictionary | 56 MiB (3.7×) | 549 MiB (3.6×) | 5.90 GiB (4.0×) | partial (buckets) | ~fast | per-key only, no snapshots |
+| ImmutableDictionary | 61 MiB (4.0×) | 610 MiB (4.0×) | 5.96 GiB (4.0×) | 0% | ~585 ns | O(B log N) |
 
-¹ `Dictionary` built from an enumerable (no count) grows by prime-doubling and lands over-sized —
+¹ All seven structures were also measured at the 100M tier (the earlier report only ran the
+top candidates there). Per-row cost is scale-invariant for every structure — `ImmutableArray`
+stays exactly 1.0× raw at 100M and works as a *read-only* container at any size; what rules it
+out for this workload is unchanged at every scale: 100% LOH residency from ~85 KB upward, a full
+O(N) LOH copy per refresh (1.49 GiB per batch at 100M), and no keyed lookup.
+² `Dictionary` built from an enumerable (no count) grows by prime-doubling and lands over-sized —
 at 100M rows its capacity overshoot alone wastes ~1.5 GiB. Pre-sizing fixes that but does not get
 it off the LOH.
-² `ImmutableList` needs a separate key→index map for keyed access; add one `Dictionary` row above
+³ `ImmutableList` needs a separate key→index map for keyed access; add one `Dictionary` row above
 to its cost for a fair keyed-workload comparison (which also puts it on the LOH).
 
 **What the overall picture says:**
