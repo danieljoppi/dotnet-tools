@@ -1,0 +1,78 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  unit-tests:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - name: Build
+        run: dotnet build -c Release
+      - name: Run unit tests
+        run: >
+          dotnet test tests/DotnetTools.SnapshotCache.Tests -c Release --no-build
+          --filter "Category!=Performance"
+          --logger "trx;LogFileName=unit-tests.trx"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: unit-test-results
+          path: '**/TestResults/*.trx'
+
+  performance-tests:
+    name: Performance tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - name: Build
+        run: dotnet build -c Release
+      # Fast guardrails asserting the cost *shape* (allocation-free reads, O(batch) allocation,
+      # no LOH growth, batch-apply beats full rebuild) — minutes, not the full benchmark run.
+      - name: Run performance tests
+        run: >
+          dotnet test tests/DotnetTools.SnapshotCache.Tests -c Release --no-build
+          --filter "Category=Performance"
+          --logger "trx;LogFileName=performance-tests.trx"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: performance-test-results
+          path: '**/TestResults/*.trx'
+
+  benchmark-smoke:
+    name: Benchmarks (short run)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      # ShortRun gives indicative numbers in ~15 minutes. CI runners are noisy: treat these as a
+      # regression smoke signal, and run the full suite locally before trusting small deltas.
+      - name: Run batch-update benchmarks (ShortRun)
+        run: >
+          dotnet run -c Release --project benchmarks/DotnetTools.SnapshotCache.Benchmarks
+          -- --filter '*BatchUpdate*' --job short --memory
+      - name: Publish results to job summary
+        if: always()
+        run: |
+          for f in BenchmarkDotNet.Artifacts/results/*-report-github.md; do
+            [ -e "$f" ] || continue
+            cat "$f" >> "$GITHUB_STEP_SUMMARY"
+          done
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: benchmark-results
+          path: BenchmarkDotNet.Artifacts/results/
