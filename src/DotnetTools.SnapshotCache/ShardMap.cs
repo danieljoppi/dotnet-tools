@@ -9,8 +9,9 @@ namespace DotnetTools.SnapshotCache;
 /// (~39 B/entry effective) this stores ~13 B/slot for 8-byte keys (~22 B/entry at working load),
 /// cutting the dominant share of a large table's footprint, and it clones as three array copies.
 ///
-/// Layout: parallel arrays (keys / values / control byte per slot), power-of-two capacity, linear
-/// probing, tombstones on remove, rehash (which purges tombstones) when occupancy passes ~72%.
+/// Layout: parallel arrays (keys / values / control byte per slot), exact (non-pow2) capacity
+/// with multiply-shift slot mapping, linear probing with explicit wrap, tombstones on remove,
+/// rehash (which purges tombstones) when occupancy passes 75%.
 /// Not thread-safe for writes; published shards are immutable by convention (writers clone first),
 /// which is what makes lock-free snapshot reads safe.
 /// </summary>
@@ -32,7 +33,11 @@ internal sealed class ShardMap<TKey>
     internal ShardMap(IEqualityComparer<TKey> comparer, int capacity = MinCapacity)
     {
         _comparer = comparer;
-        capacity = (int)BitOperations.RoundUpToPowerOf2((uint)Math.Max(MinCapacity, capacity));
+        // Capacity is NOT rounded to a power of two: the start slot comes from a multiply-shift
+        // onto [0, capacity) and probing wraps explicitly, so any size works. This matters: with
+        // pow2 rounding a shard expecting ~190 entries lands on 512 slots (37% fill); exact sizing
+        // keeps working fill near 66%, which is most of the index's memory footprint.
+        capacity = Math.Max(MinCapacity, capacity);
         _keys = new TKey[capacity];
         _values = new int[capacity];
         _states = new byte[capacity];
@@ -56,17 +61,17 @@ internal sealed class ShardMap<TKey>
     // key in this shard shares those bits. Mix with a different odd constant here and take high
     // bits of that, so probing quality is independent of the shard routing.
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private int StartSlot(TKey key, int mask)
+    private int StartSlot(TKey key, int capacity)
     {
         uint mixed = (uint)(_comparer.GetHashCode(key) * -1937831252 /* 0x8C979A2C, distinct odd mix */);
-        return (int)((mixed * (ulong)(mask + 1)) >> 32); // high-bits multiply-shift onto [0, capacity)
+        return (int)((mixed * (ulong)capacity) >> 32); // high-bits multiply-shift onto [0, capacity)
     }
 
     public bool TryGetValue(TKey key, out int value)
     {
         var states = _states;
-        int mask = states.Length - 1;
-        int slot = StartSlot(key, mask);
+        int capacity = states.Length;
+        int slot = StartSlot(key, capacity);
         while (true)
         {
             byte state = states[slot];
@@ -80,7 +85,10 @@ internal sealed class ShardMap<TKey>
                 value = _values[slot];
                 return true;
             }
-            slot = (slot + 1) & mask;
+            if (++slot == capacity)
+            {
+                slot = 0;
+            }
         }
     }
 
@@ -91,8 +99,8 @@ internal sealed class ShardMap<TKey>
         {
             Rehash();
         }
-        int mask = _states.Length - 1;
-        int slot = StartSlot(key, mask);
+        int capacity = _states.Length;
+        int slot = StartSlot(key, capacity);
         int firstTombstone = -1;
         while (true)
         {
@@ -122,14 +130,17 @@ internal sealed class ShardMap<TKey>
                 _values[slot] = value;
                 return;
             }
-            slot = (slot + 1) & mask;
+            if (++slot == capacity)
+            {
+                slot = 0;
+            }
         }
     }
 
     public bool Remove(TKey key)
     {
-        int mask = _states.Length - 1;
-        int slot = StartSlot(key, mask);
+        int capacity = _states.Length;
+        int slot = StartSlot(key, capacity);
         while (true)
         {
             byte state = _states[slot];
@@ -147,14 +158,17 @@ internal sealed class ShardMap<TKey>
                 _count--;
                 return true;
             }
-            slot = (slot + 1) & mask;
+            if (++slot == capacity)
+            {
+                slot = 0;
+            }
         }
     }
 
     private void Rehash()
     {
-        // Size so live entries sit at ≤ 50% load, which also purges all tombstones.
-        int newCapacity = (int)BitOperations.RoundUpToPowerOf2((uint)Math.Max(MinCapacity, _count * 2));
+        // Size so live entries sit at ~55% load, which also purges all tombstones.
+        int newCapacity = Math.Max(MinCapacity, _count * 9 / 5);
         var oldKeys = _keys;
         var oldValues = _values;
         var oldStates = _states;
