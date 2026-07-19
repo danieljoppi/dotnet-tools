@@ -7,6 +7,14 @@ if (args.Length > 2 && args[0] == "--memory-profile")
     return;
 }
 
+if (args.Length > 0 && args[0] == "--immutablearray-study")
+{
+    int studyRows = args.Length > 1 ? int.Parse(args[1]) : 10_000_000;
+    int studyBatch = args.Length > 2 ? int.Parse(args[2]) : 20_000;
+    ImmutableArrayStudy.Run(studyRows, studyBatch);
+    return;
+}
+
 if (args.Length > 0 && args[0] == "--soak")
 {
     int soakRows = args.Length > 1 ? int.Parse(args[1]) : 20_000_000;
