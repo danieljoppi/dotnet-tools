@@ -1,0 +1,29 @@
+# Tail-latency study: 10M rows, 20k-change async refresh every 3s, 60s measurement, 2 readers
+
+## Workstation GC
+| Variant | Reads | p50 | p99 | p99.9 | max | reads >1ms | GC pause total | Gen2 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| SnapshotTable | 2.74M/s | 650 ns | 1.1 µs | 6.8 µs | 22.9 ms | 47 | 375 ms | 3 |
+| FrozenDictionary | 4.56M/s | 350 ns | 650 ns | 10.5 µs | 95.3 ms | 31 | 783 ms | 13 |
+| ImmutableList | 1.33M/s | 1.4 µs | 2.5 µs | 18.5 µs | 74.8 ms | 199 | 221 ms | 1 |
+| ImmutableArray | 22.46M/s | 50 ns | 50 ns | 50 ns | 54.7 ms | 69 | 195 ms | 18 |
+
+## Server GC
+| Variant | Reads | p50 | p99 | p99.9 | max | reads >1ms | GC pause total | Gen2 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| SnapshotTable | 2.75M/s | 650 ns | 1.1 µs | 7.3 µs | 68.2 ms | 171 | 228 ms | 1 |
+| FrozenDictionary | 4.37M/s | 350 ns | 750 ns | 11.5 µs | 21.8 ms | 36 | 191 ms | 21 |
+| ImmutableList | 1.33M/s | 1.4 µs | 2.2 µs | 19.5 µs | 26.8 ms | 374 | 33 ms | 0 |
+| ImmutableArray | 22.70M/s | 50 ns | 50 ns | 50 ns | 136.3 ms | 72 | 383 ms | 26 |
+
+## 100M rows, real 30 s cadence, Server GC (240 s measurement ≈ 8 refresh cycles)
+| Variant | Reads | p50 | p99 | p99.9 | max | reads >1ms | GC pause total | Gen2 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| SnapshotTable | 1.43M/s | 1.2 µs | 2.0 µs | 15.5 µs | 199.7 ms | 123 | 228 ms | 0 |
+| FrozenDictionary | — | — | — | — | — | — | — | — |
+
+FrozenDictionary at 100M: OOM-KILLED by the kernel during its first rebuild (RSS 16.0 GB, the
+machine's limit). The rebuild requires old frozen (2.6 GiB) + intermediate Dictionary (~5 GiB) +
+new frozen (2.6 GiB) alive simultaneously plus GC headroom for the churn. SnapshotTable completed
+the identical workload in ~3.5 GiB peak with Gen2=0.
+kernel: oom-kill task=dotnet anon-rss:15998840kB
