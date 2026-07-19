@@ -82,9 +82,25 @@ The 10M run showed Server GC absorbing ~0.5 GB rebuilds; the target workload reb
 per cycle. Head-to-head of the two keyed contenders at the true scale and cadence, 240 s ≈ 8
 refresh cycles:
 
-<!-- 100M-TABLE -->
+| Variant | Reads/s | p50 | p99 | p99.9 | max | reads >1 ms | GC pause total | Gen2 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| **SnapshotTable** | 1.43M | 1.2 µs | 2.0 µs | 15.5 µs | 199.7 ms¹ | 123 | **228 ms / 240 s (0.1%)** | **0** |
+| FrozenDictionary | **💥 OOM-killed** — could not complete the workload in 16 GB RAM | | | | | | | |
 
-<!-- 100M-FINDINGS -->
+¹ Single outlier with Gen2 = 0 — no GC stall of that size occurred; shared-VM scheduling/paging
+artifact (the same run's p99.99 region is µs-scale).
+
+**The 100M result is not a latency number — it's an existence proof.** The kernel OOM-killed the
+FrozenDictionary process during its first rebuild (`oom-kill … anon-rss:15998840kB`): the rebuild
+holds the old frozen structure (2.6 GiB), the intermediate `Dictionary` copy (~5 GiB), and the
+new frozen structure (2.6 GiB) alive **simultaneously**, plus GC headroom for the churn — a peak
+of 4–6× its steady state. On the target hardware class the "fastest reads" design doesn't have a
+tail-latency problem at 100M rows; it fails to run. (It would run with ~24–32 GB per instance —
+the design is buyable with roughly double the memory budget per node.)
+
+SnapshotTable completed the identical workload — same rows, same batches, same cadence — in
+~3.5 GiB peak (~1.03× its steady state), with **zero Gen2 collections in 240 seconds**, total GC
+pause 0.1%, and every percentile through p99.9 under 16 µs.
 
 ---
 
@@ -115,7 +131,7 @@ which is why its Gen2 count stays at 0–3 while rebuild designs accumulate one 
 |---|---|---|
 | ≤ ~10M rows, Server GC | **`FrozenDictionary` + async rebuild is legitimate** — measured, not conceded | 2× faster p50, pause totals on par with SnapshotTable at this scale |
 | ≤ ~10M rows, Workstation GC | `SnapshotTable` | Frozen's pause total was 2× worse (783 vs 375 ms/min) |
-| ~100M rows (the target) | see §2 measured verdict | rebuild churn grows 10×; COW cost stays O(batch) |
+| ~100M rows (the target) | **`SnapshotTable`** — the rebuild design was **OOM-killed** (§2) | rebuild peak is 4–6× steady state; COW peak is ~1.03× |
 | Positional, fixed-size, no keys | `ImmutableArray` double-buffer ([RESULTS §8](../benchmarks/RESULTS.md)) | 50 ns flat reads — if you can live within its constraints |
 | Anything | never `ImmutableList` | slowest median *and* worst tail simultaneously |
 

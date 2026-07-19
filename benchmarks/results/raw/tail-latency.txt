@@ -19,3 +19,11 @@
 ## 100M rows, real 30 s cadence, Server GC (240 s measurement ≈ 8 refresh cycles)
 | Variant | Reads | p50 | p99 | p99.9 | max | reads >1ms | GC pause total | Gen2 |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
+| SnapshotTable | 1.43M/s | 1.2 µs | 2.0 µs | 15.5 µs | 199.7 ms | 123 | 228 ms | 0 |
+| FrozenDictionary | — | — | — | — | — | — | — | — |
+
+FrozenDictionary at 100M: OOM-KILLED by the kernel during its first rebuild (RSS 16.0 GB, the
+machine's limit). The rebuild requires old frozen (2.6 GiB) + intermediate Dictionary (~5 GiB) +
+new frozen (2.6 GiB) alive simultaneously plus GC headroom for the churn. SnapshotTable completed
+the identical workload in ~3.5 GiB peak with Gen2=0.
+kernel: oom-kill task=dotnet anon-rss:15998840kB
