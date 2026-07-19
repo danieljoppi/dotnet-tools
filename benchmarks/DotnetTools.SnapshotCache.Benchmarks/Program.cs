@@ -7,6 +7,17 @@ if (args.Length > 2 && args[0] == "--memory-profile")
     return;
 }
 
+if (args.Length > 1 && args[0] == "--tail-latency")
+{
+    TailLatencyStudy.Run(
+        args[1],
+        rows: args.Length > 2 ? int.Parse(args[2]) : 10_000_000,
+        seconds: args.Length > 3 ? int.Parse(args[3]) : 60,
+        batchSize: args.Length > 4 ? int.Parse(args[4]) : 20_000,
+        refreshEveryMs: args.Length > 5 ? int.Parse(args[5]) : 3_000);
+    return;
+}
+
 if (args.Length > 0 && args[0] == "--immutablearray-study")
 {
     int studyRows = args.Length > 1 ? int.Parse(args[1]) : 10_000_000;
