@@ -176,6 +176,32 @@ to its cost for a fair keyed-workload comparison (which also puts it on the LOH)
   cut total to ~2× raw if memory ever becomes the binding constraint — tracked as a possible
   follow-up, not needed to meet the current budget (4.84 GiB for 100M rows fits comfortably).
 
+### Why steady-state size misleads: the churn analysis
+
+`ImmutableArray`'s 1.0× footprint makes it look like the winner above — until the 30-second
+cadence enters the analysis. Resident size is what a structure holds *between* refreshes; a cache
+is judged by what happens *at* each refresh:
+
+| Per-cycle behavior (100M rows, every 30 s) | ImmutableArray | SnapshotTable |
+|---|---:|---:|
+| Newly allocated per refresh | **1.49 GiB, all LOH** | ~83 MiB, all small-object |
+| Peak during refresh (old + new alive) | ~3 GiB | ~3.5 GiB (only +83 MiB is new) |
+| Garbage generated per hour (120 cycles) | **~180 GiB through the LOH** | ~10 GiB through Gen0/Gen1 |
+| Reclaimed by | full/Gen2 collections (pause the app) | cheap ephemeral GCs |
+
+~180 GiB/hour of LOH turnover is the disease this library exists to cure: the LOH is not
+compacted by default, so it fragments, and reclaiming it takes the full collections that pause
+every request. And the 1.49 GiB is not the real total anyway — `ImmutableArray` has no keyed
+lookup, so a real cache pairs it with a `Dictionary<TKey,int>` index (multi-GiB, ~100% LOH at
+100M, see the table above) that must also be maintained. The honest totals for a keyed workload:
+
+- `ImmutableArray` + required index: **~4.5–6.5 GiB, nearly all LOH, churned every 30 s**
+- `SnapshotTable` (index included): **3.38 GiB, 0% LOH, ~83 MiB touched per refresh**
+
+**Rule of thumb**: `ImmutableArray` is the right tool for load-once, read-only, positional data
+at any size — its compactness there is unbeatable. For a keyed table on a refresh cadence it
+loses on every metric the cadence touches. Section 8 measures how far tuning can push it.
+
 ## 6. Soak: 400 refresh cycles under load
 
 `--soak`: 20M rows, 400 cycles of 20k changes (70% update / 15% insert / 15% remove), two reader
@@ -210,6 +236,41 @@ With reference-type rows the rebuild approaches slow down (every entry is a poin
 trace through LOH-resident arrays) while `SnapshotTable` pulls further ahead — and **clustered
 batches, the common shape of real change feeds, cost 16× less than random ones** (137 KB per
 refresh) because consecutive keys share chunks.
+
+## 8. Investigation: can the ImmutableArray approach be improved?
+
+Measured with `--immutablearray-study` (10M rows, 20k-change batch, 15 cycles per variant, p50;
+raw output: [`immutablearray-study.txt`](results/raw/immutablearray-study.txt)):
+
+| Variant | Apply p50 | Alloc/cycle | Gen2 in 15 cycles | Caveat |
+|---|---:|---:|---:|---|
+| Naive `ToBuilder`/`ToImmutable` | 80 ms | 305 MiB (LOH) | 9 | two full copies, fresh LOH array every cycle |
+| `GC.AllocateUninitializedArray` + `AsImmutableArray` | 18 ms | 153 MiB (LOH) | 5 | one copy, skips zeroing — still one LOH alloc/cycle |
+| **Pooled double-buffer + `AsImmutableArray`** | **18 ms** | **0** | **0** | see below |
+| SnapshotTable.ApplyChanges (reference) | 65 ms | 62 MiB (SOH) | 3 | — |
+
+**Findings, honestly stated:**
+
+1. **Yes, it can be improved — dramatically.** `ImmutableCollectionsMarshal.AsImmutableArray`
+   lets two persistent buffers alternate: copy current → standby, apply the batch, wrap, swap.
+   Zero steady-state allocation, zero Gen2, and at 10M rows the linear 160 MB memcpy (18 ms) is
+   actually *faster* than SnapshotTable's scattered chunk copies (65 ms). Sequential memory
+   bandwidth is hard to beat.
+2. **What the trick costs.** (a) *Immutability becomes a promise, not a guarantee*: the array
+   behind a published "immutable" snapshot is silently overwritten one cycle later, so no reader
+   may hold a snapshot across a refresh — one slow report holding last cycle's view reads torn
+   data. (b) *No keyed lookup*: the paired `Dictionary` index is still multi-GiB LOH, and keeping
+   it consistent with in-place buffer swaps reintroduces the coherence problem the snapshot design
+   solves. (c) *Growth reallocates*: inserts beyond capacity force new LOH buffers.
+   (d) *O(N) copy time per cycle regardless of batch size*: ~18 ms at 10M scales to ~200+ ms at
+   100M and grows linearly forever, while SnapshotTable's 80 ms (Server GC) tracks the batch, not
+   the table.
+3. **Verdict**: for a *positional, fixed-size, updates-only* table whose consumers never hold a
+   snapshot across a cycle, a double-buffered flat array is an excellent design — and if that is
+   your workload, use it. The moment you need keyed lookup, safe long-lived snapshots, inserts/
+   removes, or table sizes where O(N) copies bite, each fix you bolt on walks the design one step
+   closer to chunked copy-on-write — which is `SnapshotTable`. That is not a coincidence:
+   `ChunkedImmutableList` *is* the improved ImmutableArray.
 
 ## Reproducing
 

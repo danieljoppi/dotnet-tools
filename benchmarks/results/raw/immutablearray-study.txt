@@ -1,0 +1,8 @@
+# ImmutableArray improvement study: 10,000,000 rows, 20,000-change batch, 15 cycles per variant
+
+| Variant | Apply p50 | Alloc/cycle¹ | Gen2 collections | Caveat |
+|---|---:|---:|---:|---|
+| Naive ToBuilder/ToImmutable | 80 ms | 305.2 MiB | 9 | fresh LOH array every cycle |
+| Uninitialized alloc + AsImmutableArray | 18 ms | 152.6 MiB | 5 | still 1 LOH alloc/cycle |
+| Pooled double-buffer + wrap | 18 ms | 0.0 MiB | 0 | UNSAFE past 1 cycle: held snapshots get mutated; growth reallocates |
+| SnapshotTable.ApplyChanges (reference) | 65 ms | 61.6 MiB | 3 | none — designed for this |
