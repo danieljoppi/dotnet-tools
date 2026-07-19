@@ -244,10 +244,12 @@ raw output: [`immutablearray-study.txt`](results/raw/immutablearray-study.txt)):
 
 | Variant | Apply p50 | Alloc/cycle | Gen2 in 15 cycles | Caveat |
 |---|---:|---:|---:|---|
-| Naive `ToBuilder`/`ToImmutable` | 80 ms | 305 MiB (LOH) | 9 | two full copies, fresh LOH array every cycle |
+| Naive `ToBuilder`/`ToImmutable` | 70 ms | 305 MiB (LOH) | 9 | two full copies, fresh LOH array every cycle |
+| Builder + `MoveToImmutable` | 36 ms | 153 MiB (LOH) | 5 | the *safe* single-copy publish — see finding 2 |
 | `GC.AllocateUninitializedArray` + `AsImmutableArray` | 18 ms | 153 MiB (LOH) | 5 | one copy, skips zeroing — still one LOH alloc/cycle |
-| **Pooled double-buffer + `AsImmutableArray`** | **18 ms** | **0** | **0** | see below |
-| SnapshotTable.ApplyChanges (reference) | 65 ms | 62 MiB (SOH) | 3 | — |
+| Extract (`AsArray`) + mutate in place | ~0 ms | 0 | 0 | **no atomicity at all** — see finding 4 |
+| **Pooled double-buffer + `AsImmutableArray`** | **18 ms** | **0** | **0** | see finding 3 |
+| SnapshotTable.ApplyChanges (reference) | 64 ms | 62 MiB (SOH) | 3 | — |
 
 **Findings, honestly stated:**
 
@@ -256,7 +258,13 @@ raw output: [`immutablearray-study.txt`](results/raw/immutablearray-study.txt)):
    Zero steady-state allocation, zero Gen2, and at 10M rows the linear 160 MB memcpy (18 ms) is
    actually *faster* than SnapshotTable's scattered chunk copies (65 ms). Sequential memory
    bandwidth is hard to beat.
-2. **What the trick costs.** (a) *Immutability becomes a promise, not a guarantee*: the array
+2. **Builder + `MoveToImmutable` is the best *fully safe* variant.** `CreateBuilder(N)` +
+   `AddRange` + apply + `MoveToImmutable()` publishes the builder's array by ownership transfer —
+   no second copy, real immutability, half the naive cost (36 ms vs 70 ms). But it still allocates
+   one N-sized LOH array every cycle (153 MiB here, 1.49 GiB at 100M), so the churn disease — the
+   reason this analysis exists — is halved, not cured. If a team must stay on ImmutableArray with
+   zero safety compromises, this is the ceiling: ~2× faster, same LOH cadence.
+3. **What the double-buffer trick costs.** (a) *Immutability becomes a promise, not a guarantee*: the array
    behind a published "immutable" snapshot is silently overwritten one cycle later, so no reader
    may hold a snapshot across a refresh — one slow report holding last cycle's view reads torn
    data. (b) *No keyed lookup*: the paired `Dictionary` index is still multi-GiB LOH, and keeping
@@ -265,7 +273,13 @@ raw output: [`immutablearray-study.txt`](results/raw/immutablearray-study.txt)):
    (d) *O(N) copy time per cycle regardless of batch size*: ~18 ms at 10M scales to ~200+ ms at
    100M and grows linearly forever, while SnapshotTable's 80 ms (Server GC) tracks the batch, not
    the table.
-3. **Verdict**: for a *positional, fixed-size, updates-only* table whose consumers never hold a
+4. **Extract-and-mutate is not an ImmutableArray design at all.** `AsArray` + in-place writes is
+   the fastest possible (sub-millisecond, zero alloc) because it skips the copy entirely — and
+   with it every guarantee: readers observe half-applied batches *during* the write, and the
+   "immutable" value everyone holds silently changes. It is a plain mutable array wearing an
+   `ImmutableArray` type signature. Legitimate only when readers tolerate incoherent views
+   (some telemetry caches do); never for a table where a report must see one consistent version.
+5. **Verdict**: for a *positional, fixed-size, updates-only* table whose consumers never hold a
    snapshot across a cycle, a double-buffered flat array is an excellent design — and if that is
    your workload, use it. The moment you need keyed lookup, safe long-lived snapshots, inserts/
    removes, or table sizes where O(N) copies bite, each fix you bolt on walks the design one step

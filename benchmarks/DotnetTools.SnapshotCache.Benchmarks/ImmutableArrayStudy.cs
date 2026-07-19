@@ -74,6 +74,40 @@ public static class ImmutableArrayStudy
                 };
             });
 
+        RunVariant("Builder + MoveToImmutable (safe)", rows, cycles, batchKeys,
+            "1 LOH alloc/cycle; the safe way to avoid the second copy",
+            source =>
+            {
+                var current = ImmutableArray.CreateRange(source);
+                return () =>
+                {
+                    var builder = ImmutableArray.CreateBuilder<KeyValuePair<long, long>>(rows);
+                    builder.AddRange(current);
+                    foreach (int k in batchKeys)
+                    {
+                        builder[k] = new KeyValuePair<long, long>(k, -1);
+                    }
+                    current = builder.MoveToImmutable(); // transfers ownership, no copy
+                    return current;
+                };
+            });
+
+        RunVariant("Extract (AsArray) + mutate in place", rows, cycles, batchKeys,
+            "NO atomicity: readers see half-applied batches mid-write",
+            source =>
+            {
+                var current = ImmutableArray.CreateRange(source);
+                var raw = ImmutableCollectionsMarshal.AsArray(current)!;
+                return () =>
+                {
+                    foreach (int k in batchKeys)
+                    {
+                        raw[k] = new KeyValuePair<long, long>(k, -1);
+                    }
+                    return current;
+                };
+            });
+
         RunVariant("Pooled double-buffer + wrap", rows, cycles, batchKeys,
             "UNSAFE past 1 cycle: held snapshots get mutated; growth reallocates",
             source =>

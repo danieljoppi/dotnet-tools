@@ -2,7 +2,9 @@
 
 | Variant | Apply p50 | Alloc/cycle¹ | Gen2 collections | Caveat |
 |---|---:|---:|---:|---|
-| Naive ToBuilder/ToImmutable | 80 ms | 305.2 MiB | 9 | fresh LOH array every cycle |
+| Naive ToBuilder/ToImmutable | 70 ms | 305.2 MiB | 9 | fresh LOH array every cycle |
 | Uninitialized alloc + AsImmutableArray | 18 ms | 152.6 MiB | 5 | still 1 LOH alloc/cycle |
+| Builder + MoveToImmutable (safe) | 36 ms | 152.6 MiB | 5 | 1 LOH alloc/cycle; the safe way to avoid the second copy |
+| Extract (AsArray) + mutate in place | 0 ms | 0.0 MiB | 0 | NO atomicity: readers see half-applied batches mid-write |
 | Pooled double-buffer + wrap | 18 ms | 0.0 MiB | 0 | UNSAFE past 1 cycle: held snapshots get mutated; growth reallocates |
-| SnapshotTable.ApplyChanges (reference) | 65 ms | 61.6 MiB | 3 | none — designed for this |
+| SnapshotTable.ApplyChanges (reference) | 64 ms | 61.6 MiB | 3 | none — designed for this |
