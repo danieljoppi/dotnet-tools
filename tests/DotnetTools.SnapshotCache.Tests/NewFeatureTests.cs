@@ -262,6 +262,98 @@ public class NotificationAndParallelResetTests
     }
 
     [Fact]
+    public void SnapshotChanged_IsDeliveredOutsideTheWriteLock()
+    {
+        // Regression for issue #18: with the handler invoked under the write lock, a handler that
+        // waits on another thread's write deadlocks. Now delivery happens after release, so a
+        // concurrent writer can proceed while the handler waits for it.
+        var table = new SnapshotTable<int, int>();
+        bool concurrentWriteCompleted = false;
+        table.SnapshotChanged += _ =>
+        {
+            if (concurrentWriteCompleted)
+            {
+                return; // only the first event performs the cross-thread wait
+            }
+            var writer = Task.Run(() => table.Upsert(100, 100));
+            concurrentWriteCompleted = writer.Wait(TimeSpan.FromSeconds(10));
+        };
+
+        table.Upsert(1, 1);
+
+        Assert.True(concurrentWriteCompleted,
+            "a writer on another thread could not acquire the write lock while a handler ran");
+        Assert.Equal(100, table[100]);
+    }
+
+    [Fact]
+    public void SnapshotChanged_ReentrantHandler_NoDeadlockNoNestedDelivery_EventsInOrder()
+    {
+        var table = new SnapshotTable<int, int>();
+        var versions = new List<long>();
+        bool inHandler = false;
+        table.SnapshotChanged += args =>
+        {
+            Assert.False(inHandler, "events must be delivered one at a time, never nested");
+            inHandler = true;
+            versions.Add(args.Version);
+            if (args.UpsertedKeys.Contains(1))
+            {
+                table.Upsert(2, 2); // reentrant publish from inside a handler
+            }
+            inHandler = false;
+        };
+
+        table.Upsert(1, 1);
+
+        Assert.Equal(2, versions.Count);
+        Assert.True(versions[0] < versions[1], "events arrived out of publish order");
+        Assert.Equal(2, table[2]);
+    }
+
+    [Fact]
+    public void SnapshotVersion_StrictlyIncreasesAcrossEveryPublish()
+    {
+        var table = new SnapshotTable<long, long>();
+        var held = table.GetSnapshot();
+        Assert.Equal(0, held.Version);
+
+        long eventVersion = -1;
+        table.SnapshotChanged += args => eventVersion = args.Version;
+
+        table.ApplyChanges([KeyValuePair.Create(1L, 1L)]);
+        var afterBatch = table.GetSnapshot();
+        Assert.True(afterBatch.Version > held.Version);
+        Assert.Equal(afterBatch.Version, eventVersion);
+
+        table.Reset([KeyValuePair.Create(2L, 2L)]);
+        var afterReset = table.GetSnapshot();
+        Assert.True(afterReset.Version > afterBatch.Version);
+
+        table.Clear();
+        Assert.True(table.GetSnapshot().Version > afterReset.Version);
+
+        Assert.Equal(0, held.Version); // a held snapshot keeps its version forever
+    }
+
+    [Fact]
+    public void TryRemove_ReturnsRemovedValue_AndFalseForMissing()
+    {
+        var table = new SnapshotTable<long, string>();
+        var byLength = table.CreateIndex((_, v) => v.Length);
+        table.ApplyChanges([KeyValuePair.Create(1L, "one"), KeyValuePair.Create(2L, "two")]);
+
+        Assert.True(table.TryRemove(1, out var removed));
+        Assert.Equal("one", removed);
+        Assert.False(table.ContainsKey(1));
+        Assert.Equal([2L], table.GetSnapshot().Lookup(byLength, 3)); // index left consistent
+
+        Assert.False(table.TryRemove(1, out var missing));
+        Assert.Null(missing);
+        Assert.Equal(1, table.Count);
+    }
+
+    [Fact]
     public void ResetParallel_MatchesSequentialReset()
     {
         const int n = 200_000;

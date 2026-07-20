@@ -55,11 +55,58 @@ public sealed class SnapshotTable<TKey, TValue> : IReadOnlyCollection<KeyValuePa
     private readonly ShardMap<TKey> _emptyShard; // shared placeholder; never mutated (writers clone)
     private readonly List<Func<IndexState<TKey, TValue>>> _indexFactories = [];
     private readonly object _writeLock = new();
+    private readonly object _notifyLock = new();
+    private readonly Queue<SnapshotChangedEventArgs> _pendingNotifications = new();
+    private bool _notifying;
     private TableSnapshot _current;
 
-    /// <summary>Raised inside the write lock immediately after a new snapshot is published.
-    /// Handlers must be fast; heavy work should be queued elsewhere.</summary>
+    /// <summary>Raised after each atomic snapshot publication, <b>outside</b> the write lock:
+    /// a slow or reentrant handler cannot stall writers or deadlock the table. Events are
+    /// delivered one at a time in publish order (enqueued under the write lock, drained by
+    /// whichever publishing thread gets there first). Because delivery happens after the swap,
+    /// a handler may observe an even newer current snapshot than the event's — use
+    /// <see cref="SnapshotChangedEventArgs.Snapshot"/> for the state the batch produced.</summary>
     public event Action<SnapshotChangedEventArgs>? SnapshotChanged;
+
+    /// <summary>Called inside the write lock so queue order is publish order.</summary>
+    private void EnqueueNotification(SnapshotChangedEventArgs args)
+    {
+        lock (_notifyLock)
+        {
+            _pendingNotifications.Enqueue(args);
+        }
+    }
+
+    /// <summary>Delivers pending events in order, outside the write lock. Only one thread drains
+    /// at a time; a publish that happens while another thread is delivering (including a handler
+    /// reentrantly applying changes) is picked up by the active drainer's next loop pass.</summary>
+    private void DrainNotifications()
+    {
+        while (true)
+        {
+            SnapshotChangedEventArgs args;
+            lock (_notifyLock)
+            {
+                if (_notifying || _pendingNotifications.Count == 0)
+                {
+                    return;
+                }
+                _notifying = true;
+                args = _pendingNotifications.Dequeue();
+            }
+            try
+            {
+                SnapshotChanged?.Invoke(args);
+            }
+            finally
+            {
+                lock (_notifyLock)
+                {
+                    _notifying = false;
+                }
+            }
+        }
+    }
 
     /// <param name="capacityHint">Expected number of rows; see <see cref="SnapshotTableOptions{TKey}.CapacityHint"/>.</param>
     /// <param name="comparer">Key comparer; defaults to <see cref="EqualityComparer{TKey}.Default"/>.</param>
@@ -87,7 +134,7 @@ public sealed class SnapshotTable<TKey, TValue> : IReadOnlyCollection<KeyValuePa
             ? ChunkedImmutableList<KeyValuePair<TKey, TValue>>.EmptyWithChunkRows(options.ChunkRows)
             : ChunkedImmutableList<KeyValuePair<TKey, TValue>>.EmptyWithTargetBytes(
                 options.CapacityHint >= 8_000_000 ? 4 * 1024 : 64 * 1024);
-        _current = new TableSnapshot(this, _emptyRows, NewEmptyDirectory(), []);
+        _current = new TableSnapshot(this, _emptyRows, NewEmptyDirectory(), [], version: 0);
     }
 
     private ShardMap<TKey>[][] NewEmptyDirectory()
@@ -161,7 +208,8 @@ public sealed class SnapshotTable<TKey, TValue> : IReadOnlyCollection<KeyValuePa
             {
                 indexes[i] = _indexFactories[i]();
             }
-            Volatile.Write(ref _current, new TableSnapshot(this, _current.Rows, _current.Directory, indexes));
+            Volatile.Write(ref _current,
+                new TableSnapshot(this, _current.Rows, _current.Directory, indexes, _current.Version + 1));
             return definition;
         }
     }
@@ -172,17 +220,23 @@ public sealed class SnapshotTable<TKey, TValue> : IReadOnlyCollection<KeyValuePa
         ApplyChanges([new KeyValuePair<TKey, TValue>(key, value)], null);
 
     /// <summary>Removes a single row; returns false if the key was not present.</summary>
-    public bool Remove(TKey key)
+    public bool Remove(TKey key) => TryRemove(key, out _);
+
+    /// <summary>Removes a single row and returns the value it held, in one write-lock pass —
+    /// no separate lookup + remove needed (and no race window between them for readers of the
+    /// return value). Returns false with a default <paramref name="value"/> for missing keys.</summary>
+    public bool TryRemove(TKey key, out TValue value)
     {
-        lock (_writeLock) // Monitor is reentrant, so the nested ApplyChanges lock is fine.
+        lock (_writeLock)
         {
-            if (!_current.ContainsKey(key))
+            if (!_current.TryGetValue(key, out value))
             {
                 return false;
             }
-            ApplyChanges(null, [key]);
-            return true;
+            ApplyChangesCore(null, [key]);
         }
+        DrainNotifications();
+        return true;
     }
 
     /// <summary>Applies a batch of upserts and removes as one atomic snapshot transition.
@@ -191,6 +245,16 @@ public sealed class SnapshotTable<TKey, TValue> : IReadOnlyCollection<KeyValuePa
     public void ApplyChanges(
         IEnumerable<KeyValuePair<TKey, TValue>>? upserts,
         IEnumerable<TKey>? removes = null)
+    {
+        ApplyChangesCore(upserts, removes);
+        DrainNotifications();
+    }
+
+    /// <summary>The locked batch transition. Callers that already hold the write lock (e.g.
+    /// <see cref="TryRemove"/>) use this directly and drain notifications after releasing.</summary>
+    private void ApplyChangesCore(
+        IEnumerable<KeyValuePair<TKey, TValue>>? upserts,
+        IEnumerable<TKey>? removes)
     {
         lock (_writeLock)
         {
@@ -286,11 +350,11 @@ public sealed class SnapshotTable<TKey, TValue> : IReadOnlyCollection<KeyValuePa
                     newIndexes[i] = indexes[i].Freeze(indexWriters[i]);
                 }
             }
-            var next = new TableSnapshot(this, rows.ToImmutable(), writer.Directory, newIndexes);
+            var next = new TableSnapshot(this, rows.ToImmutable(), writer.Directory, newIndexes, snapshot.Version + 1);
             Volatile.Write(ref _current, next);
             if (notify)
             {
-                SnapshotChanged?.Invoke(new SnapshotChangedEventArgs(next, upsertedKeys!, removedKeys!, isFullReload: false));
+                EnqueueNotification(new SnapshotChangedEventArgs(next, upsertedKeys!, removedKeys!, isFullReload: false));
             }
         }
     }
@@ -338,6 +402,7 @@ public sealed class SnapshotTable<TKey, TValue> : IReadOnlyCollection<KeyValuePa
             }
             PublishReload(builder.ToImmutable(), dir, indexes, indexWriters);
         }
+        DrainNotifications();
     }
 
     /// <summary>
@@ -412,6 +477,7 @@ public sealed class SnapshotTable<TKey, TValue> : IReadOnlyCollection<KeyValuePa
             }
             PublishReload(rowList, dir, indexes, indexWriters);
         }
+        DrainNotifications();
     }
 
     private int ShardPresizeCapacity() =>
@@ -468,9 +534,12 @@ public sealed class SnapshotTable<TKey, TValue> : IReadOnlyCollection<KeyValuePa
                 indexes[i] = indexes[i].Freeze(indexWriters[i]);
             }
         }
-        var next = new TableSnapshot(this, rows, dir, indexes);
+        var next = new TableSnapshot(this, rows, dir, indexes, _current.Version + 1);
         Volatile.Write(ref _current, next);
-        SnapshotChanged?.Invoke(new SnapshotChangedEventArgs(next, [], [], isFullReload: true));
+        if (SnapshotChanged is not null)
+        {
+            EnqueueNotification(new SnapshotChangedEventArgs(next, [], [], isFullReload: true));
+        }
     }
 
     /// <summary>Removes all rows.</summary>
@@ -480,6 +549,7 @@ public sealed class SnapshotTable<TKey, TValue> : IReadOnlyCollection<KeyValuePa
         {
             PublishReload(_emptyRows, NewEmptyDirectory(), NewEmptyIndexes(), null);
         }
+        DrainNotifications();
     }
 
     public Enumerator GetEnumerator() => new(GetSnapshot());
@@ -516,6 +586,10 @@ public sealed class SnapshotTable<TKey, TValue> : IReadOnlyCollection<KeyValuePa
         public IReadOnlyList<TKey> UpsertedKeys { get; }
         public IReadOnlyList<TKey> RemovedKeys { get; }
         public bool IsFullReload { get; }
+
+        /// <summary>The published snapshot's <see cref="TableSnapshot.Version"/>, for consumers
+        /// tracking staleness without holding the snapshot itself.</summary>
+        public long Version => Snapshot.Version;
 
         internal SnapshotChangedEventArgs(
             TableSnapshot snapshot, IReadOnlyList<TKey> upsertedKeys, IReadOnlyList<TKey> removedKeys, bool isFullReload)
@@ -586,13 +660,22 @@ public sealed class SnapshotTable<TKey, TValue> : IReadOnlyCollection<KeyValuePa
             SnapshotTable<TKey, TValue> table,
             ChunkedImmutableList<KeyValuePair<TKey, TValue>> rows,
             ShardMap<TKey>[][] directory,
-            IndexState<TKey, TValue>[] indexes)
+            IndexState<TKey, TValue>[] indexes,
+            long version)
         {
             _table = table;
             Rows = rows;
             Directory = directory;
             Indexes = indexes;
+            Version = version;
         }
+
+        /// <summary>Strictly increasing publication counter: every atomic transition
+        /// (<see cref="ApplyChanges"/>, <see cref="Reset"/>, <see cref="ResetParallel"/>,
+        /// <see cref="Clear"/>, index registration) produces a snapshot with a higher version.
+        /// Two snapshots with the same version are the same snapshot; compare versions instead of
+        /// references to implement "am I stale?" checks.</summary>
+        public long Version { get; }
 
         public int Count => Rows.Count;
 
