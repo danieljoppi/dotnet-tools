@@ -27,7 +27,7 @@ namespace DotnetTools.SnapshotCache.Benchmarks;
 public static class BucketLohStudy
 {
     private static readonly string[] Approaches =
-        ["ImmArray_AddRange", "List_Then_PublishArray", "ChunkedList_Builder", "SnapshotTable_Rekeyed"];
+        ["ImmArray_AddRange", "List_Then_PublishArray", "ChunkedList_Builder", "SnapshotTable_Rekeyed", "MultiValue_Table"];
 
     public static void Run(int entities, int buckets, string skew, int cycles)
     {
@@ -162,6 +162,7 @@ public static class BucketLohStudy
             "List_Then_PublishArray" => new ListPublishStore(pristine),
             "ChunkedList_Builder" => new ChunkedStore(pristine),
             "SnapshotTable_Rekeyed" => new TableStore(pristine, entities),
+            "MultiValue_Table" => new MultiValueStore(pristine),
             _ => throw new ArgumentException(approach),
         };
     }
@@ -256,6 +257,32 @@ public static class BucketLohStudy
                 }
                 _buckets[change.GroupId] = builder.ToImmutable();
             }
+        }
+    }
+
+    private sealed class MultiValueStore : IBucketStore
+    {
+        private readonly MultiValueSnapshotTable<long, Entity> _table;
+
+        public MultiValueStore(Entity[][] pristine)
+        {
+            _table = new MultiValueSnapshotTable<long, Entity>(keyCapacityHint: pristine.Length);
+            _table.Reset(pristine.Select((b, g) => KeyValuePair.Create((long)g, (IReadOnlyList<Entity>)b)));
+        }
+
+        public object CaptureSnapshot() => _table.GetSnapshot();
+
+        public void ApplyBatch(BucketWorkload.Change[] batch)
+        {
+            var changes = new BucketChange<long, Entity>[batch.Length];
+            for (int i = 0; i < batch.Length; i++)
+            {
+                var change = batch[i];
+                changes[i] = change.Appends.Length > 0
+                    ? BucketChange.Append((long)change.GroupId, change.Appends)
+                    : BucketChange.ReplaceAt((long)change.GroupId, change.Replacements);
+            }
+            _table.ApplyChanges(changes);
         }
     }
 

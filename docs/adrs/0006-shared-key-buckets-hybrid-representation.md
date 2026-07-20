@@ -1,6 +1,7 @@
 # ADR-0006: Shared-key one-to-many buckets — hybrid array/chunked representation
 
-- **Status**: Proposed (guidance adopted in RESULTS.md §9; implementation tracked in #7/#8)
+- **Status**: Accepted — implemented as `MultiValueSnapshotTable<TKey, TEntity>` (issue #8), with
+  the same hybrid applied to secondary-index buckets (issue #9)
 - **Date**: 2026-07-20
 - **Related**: issue #6 measurements (RESULTS.md §9–§10, `bucket-loh-*.txt`), issues #7, #8, #9
 
