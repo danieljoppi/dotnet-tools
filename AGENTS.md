@@ -116,8 +116,14 @@ Three axes, in this order of non-negotiability, all three always:
   writer batches all changes to one promoted bucket through a single builder). #8 **done**
   (`MultiValueSnapshotTable<TKey, TEntity>`: the packaged hybrid bucket store — batch parity with
   raw chunked, 1.02× arrays at rest, 0.0 LOH; reads pay `IReadOnlyList` interface dispatch, a
-  typed scan API is the noted follow-up). Open: #11's remainder (index-writer bookkeeping, chunk
-  scatter), #12 (bench follow-ups: Server GC + p95 study, timing precision, charts).
+  typed scan API is the noted follow-up). #31 **done** (RESULTS.md §14: `MultiValueSnapshotTable`
+  folds same-key `Append`/`ReplaceAt` through one builder per batch — ~10× time / ~47× alloc on
+  50 same-key appends to a promoted bucket; also fixed en route: a first oversized `Append` to an
+  absent key now promotes straight to chunks instead of materializing one LOH-sized array).
+  #32 **done** (RESULTS.md §14: `ImmutableList` measured across the shared-key matrix — LOH-zero
+  with the lowest alloc/batch, but the worst LOH-safe reads and +30% resident heap; bench-only,
+  not adopted in the API). Open: #11's remainder (index-writer bookkeeping, chunk scatter),
+  #12 (bench follow-ups: Server GC + p95 study, timing precision, charts).
 - Bucket *read* performance (chunked indexing/enumeration vs contiguous arrays) is measured in
   `BucketReadBenchmarks` — keep it in the loop whenever bucket representations change, and use it
   before tightening the §9 recommendation thresholds.

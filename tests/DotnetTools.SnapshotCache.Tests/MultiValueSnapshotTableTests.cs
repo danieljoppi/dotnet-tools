@@ -198,11 +198,37 @@ public class MultiValueSnapshotTableTests
     }
 
     [Fact]
+    public void ManyAppendsToOnePromotedKey_InOneBatch_PublishesOnce()
+    {
+        // Issue #31, deterministic form: N Appends to one promoted key in one batch fold into a
+        // single builder, so the batch pays exactly one chunked publish — while the same appends
+        // as N batches pay one each.
+        var table = new MultiValueSnapshotTable<long, string>(keyCapacityHint: 4);
+        table.Reset([KeyValuePair.Create(7L, (IReadOnlyList<string>)Enumerable.Range(0, Promote + 200).Select(i => $"e{i}").ToArray())]);
+        var appends = Enumerable.Range(0, 50).Select(i => BucketChange.Append(7L, $"n{i}")).ToArray();
+
+        table.ApplyChanges(appends);
+        Assert.Equal(1, table.PromotedPublishesInLastBatch);
+
+        int publishes = 0;
+        foreach (var change in appends)
+        {
+            table.ApplyChanges([change]);
+            publishes += table.PromotedPublishesInLastBatch;
+        }
+        Assert.Equal(50, publishes);
+        Assert.Equal(Promote + 200 + 100, table.Lookup(7L).Count);
+    }
+
+    [Fact]
+    [Trait("Category", "Performance")]
     public void ManyAppendsToOnePromotedKey_InOneBatch_SinglePublish()
     {
         // Issue #31: N Appends to one promoted key in one batch fold into a single builder and
         // publish once. Observable as allocation: the batched path must cost far less than N
         // single-append batches, each of which pays its own ToBuilder → ToImmutable round-trip.
+        // (The deterministic form of this assertion is ..._PublishesOnce above; this is the
+        // end-to-end allocation guardrail.)
         var expected = Enumerable.Range(0, Promote + 200).Select(i => $"e{i}").ToList();
         var single = MakePromotedTable(expected);
         var batched = MakePromotedTable(expected);

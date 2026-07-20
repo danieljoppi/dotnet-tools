@@ -84,6 +84,12 @@ public sealed class MultiValueSnapshotTable<TKey, TEntity>
     private readonly object _writeLock = new();
     private TableSnapshot _current;
 
+    /// <summary>How many promoted-bucket builders the last <see cref="ApplyChanges"/> batch
+    /// folded back — i.e. chunked publishes that batch paid. Test instrumentation for the
+    /// issue-#31 acceptance ("N same-key appends → one publish"), assertable deterministically
+    /// through InternalsVisibleTo; one int write per batch, under the write lock.</summary>
+    internal int PromotedPublishesInLastBatch;
+
     /// <param name="keyCapacityHint">Expected number of distinct shared keys; sizes the shard fan-out.</param>
     /// <param name="comparer">Key comparer; defaults to <see cref="EqualityComparer{TKey}.Default"/>.</param>
     public MultiValueSnapshotTable(int keyCapacityHint = 0, IEqualityComparer<TKey>? comparer = null)
@@ -244,6 +250,7 @@ public sealed class MultiValueSnapshotTable<TKey, TEntity>
                 }
             }
 
+            PromotedPublishesInLastBatch = building?.Count ?? 0;
             if (building is not null)
             {
                 foreach (var (key, builder) in building)
