@@ -17,9 +17,45 @@ immutable collections hurts in specific, measurable ways:
 | `Dictionary` rebuild + swap | Fast reads, but a full rebuild every 30 s is O(N) CPU + O(N) allocation, and the internal `_entries`/`_buckets` arrays of a million-entry dictionary are firmly on the LOH. |
 | `FrozenDictionary<K,V>` | The fastest possible reads, but it is build-once: incorporating a batch means a full O(N) rebuild, with the same LOH-sized internal arrays. Great for tables that change rarely; wrong for a 30-second refresh cycle over millions of rows. |
 
+## Performance at a glance
+
+*BenchmarkDotNet on .NET 10, 4-core Linux VM. Full tables, methodology, and raw data in
+[`benchmarks/RESULTS.md`](benchmarks/RESULTS.md). Absolute timings on a shared VM drift ~2× between
+runs, so the **allocation / LOH / relative-ordering** columns are the ones to trust.*
+
+**The 30-second refresh — 1,000,000 rows, 5,000-change batch, keyed by `long`:**
+
+| Approach | Apply one batch | 10k point lookups | LOH per refresh | Steady-state memory |
+|---|---:|---:|---:|---:|
+| **`SnapshotTable`** | ~12 ms | ~63 ns/lookup | **0 bytes** | 2.3× raw |
+| `Dictionary` rebuild + swap | ~12 ms | **~16 ns/lookup** | ~31 MB (LOH) | 2.4× raw |
+| `FrozenDictionary` rebuild | ~60 ms | ~26 ns/lookup | ~98 MB (LOH) | 3.6× raw |
+| `ImmutableDictionary.SetItems` | ~15 ms | ~651 ns/lookup | 0 bytes | 4.0× raw |
+| `ImmutableArray` builder | ~12 ms | — *(positional only)* | ~30 MB (LOH) | 1.0× raw |
+
+`SnapshotTable` is the only row that is **LOH-free on every refresh** *and* dictionary-class on
+reads. A plain `Dictionary` reads ~4× faster — the honest price of lock-free consistent snapshots —
+but pays an O(N) LOH rebuild each cycle; the immutable BCL collections avoid the LOH but read ~10×
+slower at ~4× the memory. At the real target — **100,000,000 rows, 20,000 changes every 30 s** — no
+BCL option completes the cycle cleanly, while `SnapshotTable` applies a batch in **80 ms (Server
+GC)** with **0.0 MiB LOH growth** across the run.
+
+| Applying a 5k-change batch (1M rows) | 10k random point lookups (1M rows) |
+|:---:|:---:|
+| ![Batch apply time](benchmarks/results/charts/batch-update-time.png) | ![Read time](benchmarks/results/charts/read-time.png) |
+
+**Shared key → many values (one-to-many buckets).** For the "one key → a list of entities, some
+lists past the 85 KB LOH threshold" shape, `ChunkedImmutableList` and the packaged
+`MultiValueSnapshotTable` hold **0 MiB LOH growth** over 100 warm batches, where
+`ImmutableArray.AddRange` and `List → publish-array` leave **hundreds of MiB to gigabytes** of dead
+large objects (details in [`benchmarks/RESULTS.md` §9–§13](benchmarks/RESULTS.md)):
+
+![Shared-key bucket LOH growth](benchmarks/results/charts/bucket-loh-growth.png)
+
 ## The solution in this repo
 
-Two classes in [`src/DotnetTools.SnapshotCache`](src/DotnetTools.SnapshotCache):
+Two classes in [`src/DotnetTools.SnapshotCache`](src/DotnetTools.SnapshotCache) (plus
+`MultiValueSnapshotTable<TKey, TEntity>` for the shared-key/one-to-many shape above):
 
 ### `ChunkedImmutableList<T>`
 
@@ -138,7 +174,7 @@ Not recommended, and not built here, deliberately:
 ```
 src/DotnetTools.SnapshotCache/           the library (net8.0;net10.0, zero dependencies)
 tests/DotnetTools.SnapshotCache.Tests/   xUnit: correctness, fuzz-vs-model, snapshot isolation,
-                                         concurrency stress, LOH + performance guardrails (41 tests)
+                                         concurrency stress, LOH + performance guardrails (80+ tests)
 benchmarks/DotnetTools.SnapshotCache.Benchmarks/   BenchmarkDotNet comparisons
 ```
 
