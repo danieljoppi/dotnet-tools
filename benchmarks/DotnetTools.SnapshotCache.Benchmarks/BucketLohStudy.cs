@@ -27,7 +27,7 @@ namespace DotnetTools.SnapshotCache.Benchmarks;
 public static class BucketLohStudy
 {
     private static readonly string[] Approaches =
-        ["ImmArray_AddRange", "List_Then_PublishArray", "ChunkedList_Builder", "SnapshotTable_Rekeyed", "MultiValue_Table"];
+        ["ImmArray_AddRange", "List_Then_PublishArray", "ImmList_Builder", "ChunkedList_Builder", "SnapshotTable_Rekeyed", "MultiValue_Table"];
 
     public static void Run(
         int entities, int buckets, string skew, int cycles, int tableChunkRows = 0, string? onlyApproach = null)
@@ -166,6 +166,7 @@ public static class BucketLohStudy
         {
             "ImmArray_AddRange" => new ImmArrayStore(pristine),
             "List_Then_PublishArray" => new ListPublishStore(pristine),
+            "ImmList_Builder" => new ImmListStore(pristine),
             "ChunkedList_Builder" => new ChunkedStore(pristine),
             "SnapshotTable_Rekeyed" => new TableStore(pristine, entities, tableChunkRows),
             "MultiValue_Table" => new MultiValueStore(pristine),
@@ -237,6 +238,31 @@ public static class BucketLohStudy
                 }
                 list.AddRange(change.Appends);
                 _published[change.GroupId] = ImmutableCollectionsMarshal.AsImmutableArray(list.ToArray());
+            }
+        }
+    }
+
+    private sealed class ImmListStore(Entity[][] pristine) : IBucketStore
+    {
+        private readonly ImmutableList<Entity>[] _buckets =
+            pristine.Select(b => ImmutableList.CreateRange(b)).ToArray();
+
+        public object CaptureSnapshot() => _buckets.Clone();
+
+        public void ApplyBatch(BucketWorkload.Change[] batch)
+        {
+            foreach (var change in batch)
+            {
+                var builder = _buckets[change.GroupId].ToBuilder();
+                foreach (var (index, value) in change.Replacements)
+                {
+                    builder[index] = value;
+                }
+                foreach (var entity in change.Appends)
+                {
+                    builder.Add(entity);
+                }
+                _buckets[change.GroupId] = builder.ToImmutable();
             }
         }
     }

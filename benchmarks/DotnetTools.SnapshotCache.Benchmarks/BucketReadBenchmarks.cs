@@ -39,6 +39,7 @@ public class BucketReadBenchmarks
 
     private ImmutableArray<Entity>[] _arrays = null!;
     private ChunkedImmutableList<Entity>[] _chunked = null!;
+    private ImmutableList<Entity>[] _immLists = null!;
     private SnapshotTable<(long GroupId, long EntityId), Entity>.TableSnapshot _snapshot = null!;
     private TableIndex<(long GroupId, long EntityId), Entity, long> _byGroup = null!;
     private MultiValueSnapshotTable<long, Entity>.TableSnapshot _multiValueSnapshot = null!;
@@ -54,6 +55,7 @@ public class BucketReadBenchmarks
 
         _arrays = pristine.Select(ImmutableCollectionsMarshal.AsImmutableArray).ToArray();
         _chunked = pristine.Select(b => ChunkedImmutableList<Entity>.CreateRange(b)).ToArray();
+        _immLists = pristine.Select(b => ImmutableList.CreateRange(b)).ToArray();
 
         var table = new SnapshotTable<(long, long), Entity>(capacityHint: N);
         _byGroup = table.CreateIndex((_, e) => e.GroupId);
@@ -112,6 +114,18 @@ public class BucketReadBenchmarks
         return sum;
     }
 
+    [Benchmark(Description = "ImmList[i] x10k (hot-weighted)")]
+    public long ImmList_RandomIndex()
+    {
+        // ImmutableList's indexer walks the AVL tree — O(log n) node hops per probe (issue #32).
+        long sum = 0;
+        foreach (var (group, index) in _probes)
+        {
+            sum += _immLists[group][index].Kind;
+        }
+        return sum;
+    }
+
     [Benchmark(Description = "SnapshotTable_Rekeyed lookup x10k")]
     public long SnapshotTable_PointLookups()
     {
@@ -143,6 +157,20 @@ public class BucketReadBenchmarks
     {
         long sum = 0;
         foreach (var bucket in _chunked)
+        {
+            foreach (var entity in bucket)
+            {
+                sum += entity.Kind;
+            }
+        }
+        return sum;
+    }
+
+    [Benchmark(Description = "ImmList scan all buckets (1M entities)")]
+    public long ImmList_ScanAllBuckets()
+    {
+        long sum = 0;
+        foreach (var bucket in _immLists)
         {
             foreach (var entity in bucket)
             {

@@ -16,6 +16,9 @@ namespace DotnetTools.SnapshotCache.Benchmarks;
 ///   whole bucket array (LOH-sized for hot buckets).</item>
 ///   <item><c>List_Then_PublishArray</c> — mutable <c>List</c> master mutated in place, then one
 ///   array materialization per touched key to publish an immutable view.</item>
+///   <item><c>ImmList_Builder</c> — <c>ImmutableList</c> per key; builder → ToImmutable, AVL
+///   node sharing keeps every allocation sub-LOH (issue #32: same columns as the unique-key
+///   studies so the shared-key matrix covers it too).</item>
 ///   <item><c>ChunkedList_Builder</c> — <c>ChunkedImmutableList</c> builder → ToImmutable,
 ///   copying only touched sub-LOH chunks.</item>
 ///   <item><c>SnapshotTable_Rekeyed</c> — buckets flattened to <c>(groupId, entityId) → entity</c>
@@ -46,6 +49,8 @@ public abstract class BucketBenchmarksBase
     private ImmutableArray<Entity>[] _pristineImmArrays = null!;
     private List<Entity>[] _lists = null!;
     private ImmutableArray<Entity>[] _publishedArrays = null!;
+    private ImmutableList<Entity>[] _immLists = null!;
+    private ImmutableList<Entity>[] _pristineImmLists = null!;
     private ChunkedImmutableList<Entity>[] _chunked = null!;
     private ChunkedImmutableList<Entity>[] _pristineChunked = null!;
     private SnapshotTable<(long GroupId, long EntityId), Entity> _table = null!;
@@ -70,15 +75,18 @@ public abstract class BucketBenchmarksBase
 
         _pristineImmArrays = new ImmutableArray<Entity>[k];
         _pristineChunked = new ChunkedImmutableList<Entity>[k];
+        _pristineImmLists = new ImmutableList<Entity>[k];
         _lists = new List<Entity>[k];
         for (int g = 0; g < k; g++)
         {
             _pristineImmArrays[g] = ImmutableCollectionsMarshal.AsImmutableArray(_pristine[g]);
             _pristineChunked[g] = ChunkedImmutableList<Entity>.CreateRange(_pristine[g]);
+            _pristineImmLists[g] = ImmutableList.CreateRange(_pristine[g]);
             _lists[g] = new List<Entity>(_pristine[g]);
         }
         _immArrays = (ImmutableArray<Entity>[])_pristineImmArrays.Clone();
         _chunked = (ChunkedImmutableList<Entity>[])_pristineChunked.Clone();
+        _immLists = (ImmutableList<Entity>[])_pristineImmLists.Clone();
         _publishedArrays = new ImmutableArray<Entity>[k];
 
         _table = new SnapshotTable<(long, long), Entity>(capacityHint: n);
@@ -119,6 +127,7 @@ public abstract class BucketBenchmarksBase
             int g = change.GroupId;
             _immArrays[g] = _pristineImmArrays[g];
             _chunked[g] = _pristineChunked[g];
+            _immLists[g] = _pristineImmLists[g];
             var list = _lists[g];
             list.Clear();
             list.AddRange(_pristine[g]);
@@ -172,6 +181,28 @@ public abstract class BucketBenchmarksBase
             var published = ImmutableCollectionsMarshal.AsImmutableArray(list.ToArray());
             _publishedArrays[change.GroupId] = published;
             touched += published.Length;
+        }
+        return touched;
+    }
+
+    [Benchmark(Description = "ImmList_Builder")]
+    public long ImmList_Builder()
+    {
+        long touched = 0;
+        foreach (var change in _batch)
+        {
+            var builder = _immLists[change.GroupId].ToBuilder();
+            foreach (var (index, value) in change.Replacements)
+            {
+                builder[index] = value;
+            }
+            foreach (var entity in change.Appends)
+            {
+                builder.Add(entity);
+            }
+            var next = builder.ToImmutable();
+            _immLists[change.GroupId] = next;
+            touched += next.Count;
         }
         return touched;
     }
