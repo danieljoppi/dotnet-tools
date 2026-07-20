@@ -107,19 +107,29 @@ Run end-to-end with the console harness (`--largescale`), workstation GC, 4-core
 two reader threads continuously issued point lookups. Batch mix: 80% updates of random existing
 rows, 20% inserts of new rows. Full output: [`results/raw/largescale-100m.txt`](results/raw/largescale-100m.txt).
 
+Re-validated on the current core (compact single-chunk representation, hybrid buckets, comparer
+devirtualization). The invariants — heap size and **0.0 MiB LOH growth** — are host-independent
+and reproduce exactly; the absolute *timings* below are from a session whose box ran ~3× slower on
+load than the original run (2.8M vs 8.5M rows/s), a vivid instance of the ~2× VM-drift caveat, so
+treat the memory columns as the durable result and the times as an upper-ish bound. Fresh outputs:
+[`largescale-100m-rerun.txt`](results/raw/largescale-100m-rerun.txt),
+[`largescale-100m-rerun-servergc.txt`](results/raw/largescale-100m-rerun-servergc.txt).
+
 | Metric | Workstation GC | Server GC | Budget / context |
 |---|---:|---:|---|
-| Initial load (`ResetParallel`, one-time) | 11.8 s (8.5M rows/s) | 9.6 s (10.4M rows/s) | was 72.5 s in v0.1 |
-| Heap for 100M rows + index | **3.38 GiB** | **3.38 GiB** | 2.26× raw data |
+| Heap for 100M rows + index | **3.39 GiB** | **3.39 GiB** | 2.26× raw data |
 | **LOH size after load** | **0.0 MiB** | **0.0 MiB** | entirely small-object |
-| Apply 20k-change batch (median) | 452 ms | **80 ms** | 30,000 ms budget |
-| Allocation per batch | ~83 MiB, Gen0/Gen1 only | ~83 MiB | vs multi-GiB LOH for rebuilds |
+| Apply 20k-change batch (median) | 720 ms | **122 ms** | 30,000 ms budget (0.4%) |
+| Allocation per batch | ~83.5 MiB, Gen0/Gen1 only | ~83.5 MiB | vs multi-GiB LOH for rebuilds |
 | **LOH growth over 10 cycles** | **0.0 MiB** | **0.0 MiB** | the headline guarantee |
-| Concurrent reads during refreshes | 2.45 M lookups/s | 2.48 M lookups/s | readers never block |
+| GC collections over 10 cycles | Gen0=51 Gen1=50 **Gen2=1** | Gen0=3 Gen1=0 **Gen2=0** | zero forced full GCs |
+| Concurrent reads during refreshes | 1.53 M lookups/s | 1.95 M lookups/s | readers never block |
 
-Full outputs: [`largescale-100m.txt`](results/raw/largescale-100m.txt),
-[`largescale-100m-servergc.txt`](results/raw/largescale-100m-servergc.txt). Production services
-should run Server GC, where the batch apply drops to ~80 ms — 0.3% of the budget.
+Production services should run Server GC, where the batch apply is **122 ms median (0.4% of the
+budget)** and the ten cycles triggered **zero Gen2 collections**. On a faster host the same run has
+measured ~80 ms median / 8.5M rows-per-second loads (prior session,
+[`largescale-100m.txt`](results/raw/largescale-100m.txt)); the guarantee that does not move with
+the host is the LOH column.
 
 At this scale no BCL alternative completes the workload cleanly: `ImmutableArray` would copy a
 1.6 GB LOH array per batch, a `Dictionary`/`FrozenDictionary` rebuild would allocate ~5 GiB of

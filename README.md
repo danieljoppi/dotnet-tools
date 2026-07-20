@@ -17,9 +17,46 @@ immutable collections hurts in specific, measurable ways:
 | `Dictionary` rebuild + swap | Fast reads, but a full rebuild every 30 s is O(N) CPU + O(N) allocation, and the internal `_entries`/`_buckets` arrays of a million-entry dictionary are firmly on the LOH. |
 | `FrozenDictionary<K,V>` | The fastest possible reads, but it is build-once: incorporating a batch means a full O(N) rebuild, with the same LOH-sized internal arrays. Great for tables that change rarely; wrong for a 30-second refresh cycle over millions of rows. |
 
+## Performance at a glance
+
+*BenchmarkDotNet on .NET 10, 4-core Linux VM. Full tables, methodology, and raw data in
+[`benchmarks/RESULTS.md`](benchmarks/RESULTS.md). Absolute timings on a shared VM drift ~2× between
+runs, so the **allocation / LOH / relative-ordering** columns are the ones to trust.*
+
+**The 30-second refresh — 1,000,000 rows, 5,000-change batch, keyed by `long`:**
+
+| Approach | Apply one batch | 10k point lookups | LOH per refresh | Steady-state memory |
+|---|---:|---:|---:|---:|
+| **`SnapshotTable`** | ~12 ms | ~63 ns/lookup | **0 bytes** | 2.3× raw |
+| `Dictionary` rebuild + swap | ~12 ms | **~16 ns/lookup** | ~31 MB (LOH) | 2.4× raw |
+| `FrozenDictionary` rebuild | ~60 ms | ~26 ns/lookup | ~98 MB (LOH) | 3.6× raw |
+| `ImmutableDictionary.SetItems` | ~15 ms | ~651 ns/lookup | 0 bytes | 4.0× raw |
+| `ImmutableArray` builder | ~12 ms | — *(positional only)* | ~30 MB (LOH) | 1.0× raw |
+
+`SnapshotTable` is the only row that is **LOH-free on every refresh** *and* dictionary-class on
+reads. A plain `Dictionary` reads ~4× faster — the honest price of lock-free consistent snapshots —
+but pays an O(N) LOH rebuild each cycle; the immutable BCL collections avoid the LOH but read ~10×
+slower at ~4× the memory. At the real target — **100,000,000 rows, 20,000 changes every 30 s** — no
+BCL option completes the cycle cleanly, while `SnapshotTable` applies a batch in **~120 ms median
+(Server GC, ≈0.4% of the budget)** with **0.0 MiB LOH growth** and **zero Gen2 collections** across
+the run.
+
+| Applying a 5k-change batch (1M rows) | 10k random point lookups (1M rows) |
+|:---:|:---:|
+| ![Batch apply time](benchmarks/results/charts/batch-update-time.png) | ![Read time](benchmarks/results/charts/read-time.png) |
+
+**Shared key → many values (one-to-many buckets).** For the "one key → a list of entities, some
+lists past the 85 KB LOH threshold" shape, `ChunkedImmutableList` and the packaged
+`MultiValueSnapshotTable` hold **0 MiB LOH growth** over 100 warm batches, where
+`ImmutableArray.AddRange` and `List → publish-array` leave **hundreds of MiB to gigabytes** of dead
+large objects (details in [`benchmarks/RESULTS.md` §9–§13](benchmarks/RESULTS.md)):
+
+![Shared-key bucket LOH growth](benchmarks/results/charts/bucket-loh-growth.png)
+
 ## The solution in this repo
 
-Two classes in [`src/DotnetTools.SnapshotCache`](src/DotnetTools.SnapshotCache):
+Two classes in [`src/DotnetTools.SnapshotCache`](src/DotnetTools.SnapshotCache) (plus
+`MultiValueSnapshotTable<TKey, TEntity>` for the shared-key/one-to-many shape above):
 
 ### `ChunkedImmutableList<T>`
 
@@ -91,8 +128,31 @@ foreach (var (id, customer) in snap) { ... }               // never sees a half-
 foreach (var (id, customer) in snap.LookupRows(byRegion, "BR")) { ... }
 ```
 
+### `MultiValueSnapshotTable<TKey, TEntity>`
+
+The same guarantees for the **one key → many values** (one-to-many bucket) shape — e.g. an order
+book keyed by instrument, or events keyed by tenant — where individual buckets can grow past the
+LOH threshold. Each bucket is stored **hybrid**: a flat array while small (best reads), promoted
+to a `ChunkedImmutableList` once it crosses ~1,024 entities, so warm appends to a hot bucket copy
+one sub-LOH chunk instead of the whole list. Batches are atomic and wait-free to read, same as
+`SnapshotTable`.
+
+```csharp
+var byInstrument = new MultiValueSnapshotTable<long, Order>(keyCapacityHint: 100_000);
+byInstrument.Reset(initialBucketsPerInstrument);           // one-time load
+
+byInstrument.ApplyChanges([                                 // atomic batch of bucket changes
+    BucketChange.Append(instrumentId, newOrders),          //   append 1..N to a bucket
+    BucketChange.ReplaceAt(instrumentId, (index, order)),  //   replace a position
+    BucketChange.Remove<long, Order>(delistedId),          //   drop a whole bucket
+]);
+
+IReadOnlyList<Order> book = byInstrument.Lookup(instrumentId);  // wait-free, immutable
+```
+
 Install from the packaged build (`dotnet pack src/DotnetTools.SnapshotCache`; CI uploads the
-`.nupkg` as an artifact on every merge request).
+`.nupkg` as an artifact on every merge request, and pushing a `v*` tag publishes a GitHub Release —
+see [`.github/workflows/release.yml`](.github/workflows/release.yml)).
 
 ## Do you need this, or does something off-the-shelf fit?
 
@@ -138,7 +198,7 @@ Not recommended, and not built here, deliberately:
 ```
 src/DotnetTools.SnapshotCache/           the library (net8.0;net10.0, zero dependencies)
 tests/DotnetTools.SnapshotCache.Tests/   xUnit: correctness, fuzz-vs-model, snapshot isolation,
-                                         concurrency stress, LOH + performance guardrails (41 tests)
+                                         concurrency stress, LOH + performance guardrails (80+ tests)
 benchmarks/DotnetTools.SnapshotCache.Benchmarks/   BenchmarkDotNet comparisons
 ```
 
@@ -154,19 +214,35 @@ dotnet run -c Release --project benchmarks/DotnetTools.SnapshotCache.Benchmarks 
 dotnet run -c Release --project benchmarks/DotnetTools.SnapshotCache.Benchmarks -- --filter '*' --job short
 ```
 
-The suite covers the three phases of the workload — `InitialLoadBenchmarks` (full load of 1M rows),
-`BatchUpdateBenchmarks` (a 5k-change refresh applied to a 1M-row table, the every-30-seconds cost),
-and `ReadBenchmarks` (10k random point lookups) — each against `ImmutableArray`, `ImmutableList`,
-`ImmutableDictionary`, `Dictionary` rebuild + swap, and `FrozenDictionary` rebuild, with
-`[MemoryDiagnoser]` reporting allocations. Results from this environment are in
-[`benchmarks/RESULTS.md`](benchmarks/RESULTS.md).
+The BenchmarkDotNet suite covers the unique-key workload — `InitialLoadBenchmarks` (full load),
+`BatchUpdateBenchmarks` / `UniqueKeyBatchBenchmarks` (the every-30-seconds refresh, batch sizes
+1k–50k with removes), and `ReadBenchmarks` (10k random point lookups) — each against
+`ImmutableArray`, `ImmutableList`, `ImmutableDictionary`, `Dictionary` rebuild + swap, and
+`FrozenDictionary` rebuild. The **shared-key / one-to-many** workload lives in
+`SharedKeyBucketBenchmarks`, `LargeRefreshBenchmarks`, and `BucketReadBenchmarks`. Because
+BenchmarkDotNet cannot report Large Object Heap *occupancy*, the LOH-size deltas that back the
+headline claims come from console harnesses:
+
+```bash
+# LOH size before/after N warm batches, per approach (shared-key buckets):
+dotnet run -c Release --project benchmarks/DotnetTools.SnapshotCache.Benchmarks -- --bucket-loh 1000000 10000 zipf 10
+
+# end-to-end 100M-row / 20k-batch validation (load, apply, concurrent reads, LOH growth):
+dotnet run -c Release --project benchmarks/DotnetTools.SnapshotCache.Benchmarks -- --largescale 100000000 20000 10
+```
+
+Full results, tables, and charts from this environment are in
+[`benchmarks/RESULTS.md`](benchmarks/RESULTS.md); raw reports and harness logs under
+[`benchmarks/results/raw/`](benchmarks/results/raw/).
 
 ## Guarantees & limits
 
 - Chunk arrays, spine blocks, index shards, directory blocks, and per-batch bookkeeping all stay
   below the 85,000-byte LOH threshold by construction (tested), up to `int.MaxValue` rows.
   Validated with a real 100M-row / 20k-batch run: zero LOH growth, zero Gen2 collections
-  (`benchmarks/RESULTS.md`).
+  (`benchmarks/RESULTS.md` §4). The same holds for `MultiValueSnapshotTable` and secondary-index
+  buckets, whose lists promote to `ChunkedImmutableList` before any bucket array could reach the
+  LOH — hot 100k-member buckets append at O(chunk) cost with zero LOH growth (RESULTS.md §9).
 - One writer at a time (writers serialize on a lock; readers never block). Designed for the
   single-refresher pattern, not for high-frequency per-key contention.
 - Iteration order is insertion order until a remove occurs (swap-remove); treat enumeration as
