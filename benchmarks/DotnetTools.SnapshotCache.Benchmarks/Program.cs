@@ -35,6 +35,16 @@ if (args.Length > 0 && args[0] == "--soak")
     return;
 }
 
+if (args.Length > 0 && args[0] == "--bucket-loh")
+{
+    BucketLohStudy.Run(
+        entities: args.Length > 1 ? int.Parse(args[1]) : 1_000_000,
+        buckets: args.Length > 2 ? int.Parse(args[2]) : 10_000,
+        skew: args.Length > 3 ? args[3] : "zipf",
+        cycles: args.Length > 4 ? int.Parse(args[4]) : 10);
+    return;
+}
+
 if (args.Length > 0 && args[0] == "--largescale")
 {
     int rows = args.Length > 1 ? int.Parse(args[1]) : 100_000_000;
