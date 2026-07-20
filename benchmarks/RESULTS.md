@@ -307,7 +307,7 @@ key → a list of entities, with heavy skew (a few keys hold 10k–100k+ entitie
 10,625+ references crosses the 85,000-byte LOH threshold, so every full-copy update of a hot
 bucket is a Large Object allocation. `SharedKeyBucketBenchmarks` + the `--bucket-loh` console
 study measure four bucket representations (plus the packaged `MultiValueSnapshotTable`, #8)
-under one harness:
+under one harness (`ImmutableList` joined the same matrix later — §14):
 
 ![Bucket LOH growth](results/charts/bucket-loh-growth.png)
 
@@ -614,6 +614,149 @@ Wall time is identical within noise while bigger chunks cost more on both memory
 adaptive default stands, and the earlier one-shot runs suggesting a 3× chunk-size win were VM
 drift (which is why A/Bs here must interleave). #11's remaining gap vs the raw bucket stores is
 therefore in the per-entity index probing/bookkeeping, not row-chunk geometry.
+
+## 14. `ImmutableList` joins the shared-key matrix; same-key appends batch through one builder (#31, #32)
+
+Two follow-ups measured together on the current core:
+
+- **#31** — `MultiValueSnapshotTable.ApplyChanges` now folds every `Append`/`ReplaceAt` to the
+  same promoted key (including the promote-from-array transition) through **one**
+  `ChunkedImmutableList` builder per batch, published once when the batch swaps in — the §12
+  secondary-index builder cache, applied to the packaged bucket store. `Remove`/`ReplaceBucket`
+  discard the key's open builder (last change wins, semantics unchanged).
+- **#32** — `ImmutableList<T>`, whose unique-key story is §1–§2 (reads ~10× slower than
+  `SnapshotTable`, ~3.5× steady memory, LOH-free node sharing), joins the shared-key matrix as
+  `ImmList_Builder`: one `ImmutableList<Entity>` per key, warm updates via `ToBuilder` →
+  mutate → `ToImmutable`.
+
+### #31: one publish per touched key per batch
+
+The §9 harness coalesces changes (one `Append`/`ReplaceAt` per touched key per batch), so it
+never exposed the pattern; re-running it confirms no regression — identical allocation
+(2.1 MiB/batch at 1M Zipf, 15.0 MiB at 10M) and timing parity (0.8 → 0.9 ms and 8.1 → 9.2 ms
+medians, within this VM's session noise;
+[before](results/raw/bucket-loh-1m-10k-zipf.txt) →
+[after](results/raw/bucket-loh-1m-10k-zipf-immlist.txt), same pair for
+[10M](results/raw/bucket-loh-10m-10k-zipf-immlist.txt)).
+
+The win is for callers that emit one `Append` per entity (or several chunks) instead of
+coalescing. A/B on the same VM, same shape
+([raw](results/raw/multivalue-samekey-builder-ab.txt)): one batch of **50 one-entity Appends
+to a 100k-entity promoted bucket** cost the pre-#31 core 0.10 ms / 422 KB per batch — every
+change paid its own ToBuilder → ToImmutable round-trip. The folded path costs
+**0.01 ms / 9 KB: ~10× less time, ~47× less allocation**. (Emitting the same 50 changes as 50
+separate batches still costs 0.12 ms / 455 KB — each batch legitimately pays its own shard
+clone and snapshot swap — so the table now makes the one-batch path cheap whether or not the
+caller coalesces entities into one change.)
+
+Verified by test: 50 same-key appends in one batch must allocate under a quarter of the same
+appends applied as 50 batches (`ManyAppendsToOnePromotedKey_InOneBatch_SinglePublish`), plus
+mixed append/replace/remove-vs-model batches and mid-batch promotion; the concurrent-reader
+and LOH guardrails are unchanged and green. En route this closed a latent LOH hole: a first
+`Append` larger than 1,024 entities to an absent key used to materialize one full-size
+(possibly LOH-sized) array before any later append promoted it — it now promotes straight to
+chunks.
+
+### Batch cost with ImmList (BenchmarkDotNet, ShortRun, medians; state restored between iterations)
+
+Same harness and populations as §9–§10, all six approaches re-run in one session
+([Workload B raw](results/raw/DotnetTools.SnapshotCache.Benchmarks.SharedKeyBucketBenchmarks-report-github.md),
+[Workload C raw](results/raw/DotnetTools.SnapshotCache.Benchmarks.LargeRefreshBenchmarks-report-github.md)):
+
+| K / skew | ImmArray_AddRange | List_Then_PublishArray | ImmList_Builder | ChunkedList_Builder | SnapshotTable_Rekeyed | MultiValueSnapshotTable |
+|---|---:|---:|---:|---:|---:|---:|
+| 10k / Uniform (buckets ≈100) | **113 μs / 91 KB** | 122 μs / 91 KB | 390 μs / 96 KB | 255 μs / 535 KB | 4.8 ms / 10.9 MB | 263 μs / 316 KB |
+| 10k / Zipf (hot ≈102k) | 1.41 ms / 3.24 MB | 1.02 ms / 3.24 MB | 2.18 ms / **397 KB** | **0.50 ms** / 1.42 MB | 5.0 ms / 12.9 MB | 0.64 ms / 1.40 MB |
+| 100k / Uniform (buckets ≈10) | 0.69 ms / **199 KB** | **0.61 ms** / 199 KB | 2.81 ms / 793 KB | 1.74 ms / 4.64 MB | 24.5 ms / 45.8 MB | 2.15 ms / 2.64 MB |
+| 100k / Zipf | 1.95 ms / 4.06 MB | 1.70 ms / 4.06 MB | 6.80 ms / **1.56 MB** | 2.35 ms / 7.02 MB | 33.2 ms / 48.6 MB | **2.14 ms** / 5.59 MB |
+| Workload C (2k keys, ~800 touched) | 3.34 ms / 5.19 MB | 1.93 ms / 5.19 MB | 6.05 ms / **1.37 MB** | 2.11 ms / 6.62 MB | 34.5 ms / 43.2 MB | **1.43 ms** / 3.27 MB |
+
+The pattern is consistent: **ImmList allocates the least of any approach on skewed workloads**
+(an AVL update allocates the O(log n) spine path plus the appended nodes, where the chunked
+builder copies whole touched 4 KB chunks and the array approaches copy whole buckets) — and
+pays for it with the slowest LOH-safe wall time, 3–4× the chunked builder / MultiValue table.
+
+### The LOH columns (`--bucket-loh`, 10 warm batches, workstation GC, forced-compaction deltas)
+
+Zipf, K=10k — **1M entities** ([raw](results/raw/bucket-loh-1m-10k-zipf-immlist.txt)):
+
+| Approach | Heap after build | LOH after build | Batch p50 | Alloc/batch | LOH after 10 batches (uncompacted) | LOH after Gen2+compact | Gen2+compact pause | Extra retained by held snapshot |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| ImmArray_AddRange | 122.4 MiB | 2.2 MiB | 2.4 ms | 3.0 MiB | **23.7 MiB** | 4.4 MiB | 225 ms | 7.3 MiB |
+| List_Then_PublishArray | 130.6 MiB | 4.4 MiB | 3.2 ms | 3.8 MiB | **31.4 MiB** | 10.0 MiB | 266 ms | 7.3 MiB |
+| **ImmList_Builder** | 160.5 MiB | **0.0 MiB** | 4.0 ms | **0.6 MiB** | **0.0 MiB** | **0.0 MiB** | 320 ms | 6.2 MiB |
+| **ChunkedList_Builder** | 123.6 MiB | **0.0 MiB** | **0.8 ms** | 2.1 MiB | **0.0 MiB** | **0.0 MiB** | 206 ms | 7.0 MiB |
+| SnapshotTable_Rekeyed | 168.2 MiB | 0.0 MiB | 79.0 ms | 15.4 MiB | 0.0 MiB | 0.0 MiB | 261 ms | 52.2 MiB |
+| **MultiValueSnapshotTable** | 122.7 MiB | **0.0 MiB** | **0.9 ms** | 2.1 MiB | **0.0 MiB** | **0.0 MiB** | 202 ms | 7.3 MiB |
+
+Zipf, K=10k — **10M entities** (hottest bucket ~1.02M entities;
+[raw](results/raw/bucket-loh-10m-10k-zipf-immlist.txt)):
+
+| Approach | Heap after build | Batch p50 | Alloc/batch | LOH after 10 batches (uncompacted) | Gen2+compact pause |
+|---|---:|---:|---:|---:|---:|
+| ImmArray_AddRange | 1,289.7 MiB | 144.8 ms | 30.1 MiB | **291.6 MiB** | 1,971 ms |
+| List_Then_PublishArray | 1,366.6 MiB | 155.6 ms | 38.3 MiB | **406.6 MiB** | 2,387 ms |
+| **ImmList_Builder** | 1,671.1 MiB | 38.5 ms | **5.1 MiB** | **0.0 MiB** | 3,125 ms |
+| **ChunkedList_Builder** | 1,291.4 MiB | **6.8 ms** | 14.9 MiB | **0.0 MiB** | 1,763 ms |
+| SnapshotTable_Rekeyed | 1,759.7 MiB | 235.7 ms | 39.6 MiB | 0.0 MiB | 2,282 ms |
+| **MultiValueSnapshotTable** | 1,290.5 MiB | **9.2 ms** | 15.0 MiB | **0.0 MiB** | 1,829 ms |
+
+The uniform and refresh-shaped controls and a 100-batch endurance run tell the same story
+([uniform](results/raw/bucket-loh-1m-10k-uniform-immlist.txt),
+[refresh](results/raw/bucket-loh-1m-refresh-immlist.txt),
+[100 cycles](results/raw/bucket-loh-1m-10k-zipf-100c-immlist.txt)): **ImmList is LOH-zero at
+every scale and checkpoint** — uncompacted after cycles included — with the smallest per-batch
+allocation in the matrix. Everything else about it costs more: **+30% resident heap at rest**
+vs the chunked/hybrid stores (160.5 vs 122.7–123.6 MiB at 1M; 1,671 vs ~1,290 MiB at 10M — a
+pointer-heavy node per entity), **5–6× the chunked builder's warm-batch wall time** at both
+scales (tree rebalancing and pointer chasing vs span copies), and the **worst forced-Gen2
+pause** in the matrix (3.1 s vs 1.8 s at 10M — the collector traces one node per element).
+
+### The read side with ImmList
+
+Same read harness as §9 ([raw](results/raw/DotnetTools.SnapshotCache.Benchmarks.BucketReadBenchmarks-report-github.md);
+this session's VM ran ~2× slower than the §9 pass on the unchanged approaches — the ratios
+against ImmutableArray in the same run are the signal):
+
+| Access pattern (1M entities, K=10k) | ImmutableArray | ChunkedImmutableList | ImmList | MultiValueSnapshotTable |
+|---|---:|---:|---:|---:|
+| 10k random indexed reads, hot-weighted (Zipf) | **235 μs (1.0×)** | 291 μs (1.24×) | 2,562 μs (**10.9×**) | 545 μs (2.3×) |
+| 10k random indexed reads (Uniform) | **265 μs (1.0×)** | 334 μs (1.26×) | 1,239 μs (**4.7×**) | 438 μs (1.65×) |
+| Scan all 1M entities (Zipf) | **10.0 ms (1.0×)** | 10.0 ms (1.00×) | 31.7 ms (**3.2×**) | 16.0 ms (1.6×) |
+| Scan all 1M entities (Uniform) | **10.0 ms (1.0×)** | 10.1 ms (1.01×) | 30.2 ms (**3.0×**) | 11.6 ms (1.16×) |
+
+`ImmutableList[i]` walks the AVL tree — O(log n) node hops per probe — so its indexed-read
+premium *grows with bucket size*: ~4.7× a contiguous array on uniform ~100-entity buckets
+(tree depth ~7) but ~11× under Zipf where hot-weighted probes land in the ~102k-entity head
+(depth ~17). Full scans pay ~3× at any shape (the enumerator maintains an explicit node
+stack). Compare the chunked list, whose indexer is three flat array hops at any size: its
+premium stays 1.2–1.3× and its scans are array-parity. None of the read paths allocate.
+
+### What the ImmList columns say (the ticket's decision criteria)
+
+1. **LOH growth ≈ 0?** Yes — exactly 0.0 MiB at every scale and checkpoint, uncompacted and
+   compacted, including 100 batches of endurance.
+2. **Reads vs the alternatives:** the worst LOH-safe reader by far — 4.7–10.9× a contiguous
+   array on indexed reads (vs 1.2–1.3× chunked, 1.7–2.3× MultiValue) and ~3× on scans, with
+   the premium growing on exactly the hot buckets a skewed workload reads most.
+3. **Retained / steady-state memory vs ChunkedList:** +30% resident at rest (160.5 vs
+   123.6 MiB at 1M; 1,671 vs 1,291 MiB at 10M). Held-snapshot retention is the one memory
+   axis where ImmList edges ahead (6.2 vs 7.0 MiB at 1M Zipf) — append-shaped churn shares
+   all but the O(log n) spine path. The node-per-entity graph also makes it the slowest
+   structure to trace: the worst compacting-Gen2 pause in the matrix at 10M.
+4. **When is ImmList preferable?** Only when per-batch allocation volume is the binding
+   constraint (e.g. an allocation-rate-throttled host), reads are rare, and the resident-heap
+   premium is acceptable — a narrow niche. It is the simplest LOH-free option in the BCL, and
+   that convenience is what its read and memory columns price in.
+
+**Recommendation for a read-hot, lock-free-publish, LOH-sensitive multi-value store:** stay
+with the hybrid array/`ChunkedImmutableList` shape or the packaged `MultiValueSnapshotTable`.
+They match ImmList's 0.0 LOH while reading 4–9× faster on the hot buckets, batching 3–6×
+faster, resting 30% smaller, and compacting with shorter pauses; ImmList's lone advantage
+(lowest alloc/batch) buys nothing here because the chunked builders' allocation is already
+ephemeral Gen0 garbage that never reaches the LOH. `ImmutableList` remains what §1–§2 found
+for unique keys: the zero-dependency fallback when you cannot take a library, priced in reads
+and resident memory.
 
 ## Reproducing
 
