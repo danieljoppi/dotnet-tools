@@ -198,6 +198,157 @@ public class MultiValueSnapshotTableTests
     }
 
     [Fact]
+    public void ManyAppendsToOnePromotedKey_InOneBatch_SinglePublish()
+    {
+        // Issue #31: N Appends to one promoted key in one batch fold into a single builder and
+        // publish once. Observable as allocation: the batched path must cost far less than N
+        // single-append batches, each of which pays its own ToBuilder → ToImmutable round-trip.
+        var expected = Enumerable.Range(0, Promote + 200).Select(i => $"e{i}").ToList();
+        var single = MakePromotedTable(expected);
+        var batched = MakePromotedTable(expected);
+        var appends = Enumerable.Range(0, 50).Select(i => $"n{i}").ToArray();
+        expected.AddRange(appends);
+
+        long AppendAndMeasure(MultiValueSnapshotTable<long, string> table, bool oneBatch)
+        {
+            var changes = appends.Select(a => BucketChange.Append(7L, a)).ToArray();
+            long before = GC.GetAllocatedBytesForCurrentThread();
+            if (oneBatch)
+            {
+                table.ApplyChanges(changes);
+            }
+            else
+            {
+                foreach (var change in changes)
+                {
+                    table.ApplyChanges([change]);
+                }
+            }
+            return GC.GetAllocatedBytesForCurrentThread() - before;
+        }
+
+        // Warm both paths once (JIT + dictionary growth) on throwaway tables before measuring.
+        AppendAndMeasure(MakePromotedTable(expected), oneBatch: true);
+        AppendAndMeasure(MakePromotedTable(expected), oneBatch: false);
+
+        long batchedBytes = AppendAndMeasure(batched, oneBatch: true);
+        long singleBytes = AppendAndMeasure(single, oneBatch: false);
+
+        Assert.Equal(expected, batched.Lookup(7L));
+        Assert.Equal(expected, single.Lookup(7L));
+        Assert.True(batchedBytes * 4 < singleBytes,
+            $"50 same-key appends in one batch allocated {batchedBytes} bytes vs {singleBytes} across 50 batches — expected the batched path to publish once, not 50 times");
+
+        static MultiValueSnapshotTable<long, string> MakePromotedTable(IEnumerable<string> seed)
+        {
+            var table = new MultiValueSnapshotTable<long, string>(keyCapacityHint: 4);
+            table.Reset([KeyValuePair.Create(7L, (IReadOnlyList<string>)seed.ToArray())]);
+            return table;
+        }
+    }
+
+    [Fact]
+    public void AppendReplaceAppend_SameKey_OneBatch_MatchesModel()
+    {
+        // The ReplaceAt lands between two Appends to the same promoted key, targeting both the
+        // pre-batch region and an element appended earlier in the same batch.
+        var model = Enumerable.Range(0, Promote + 10).Select(i => $"e{i}").ToList();
+        var table = new MultiValueSnapshotTable<long, string>();
+        table.Reset([KeyValuePair.Create(1L, (IReadOnlyList<string>)model.ToArray())]);
+
+        model.AddRange(["a0", "a1"]);
+        model[0] = "patched-old";
+        model[^1] = "patched-new";
+        model.Add("a2");
+        table.ApplyChanges(
+        [
+            BucketChange.Append(1L, "a0", "a1"),
+            BucketChange.ReplaceAt(1L, (0, "patched-old"), (model.Count - 2, "patched-new")),
+            BucketChange.Append(1L, "a2"),
+        ]);
+
+        Assert.Equal(model, table.Lookup(1L));
+    }
+
+    [Fact]
+    public void AppendThenRemove_SameKey_OneBatch_KeyGone()
+    {
+        var table = new MultiValueSnapshotTable<long, string>();
+        // Both a promoted key (open builder discarded by Remove) and a fresh key created and
+        // removed within the same batch.
+        table.Reset([KeyValuePair.Create(1L, (IReadOnlyList<string>)Enumerable.Range(0, Promote + 5).Select(i => $"e{i}").ToArray())]);
+
+        table.ApplyChanges(
+        [
+            BucketChange.Append(1L, "doomed"),
+            BucketChange.Append(2L, "also-doomed"),
+            BucketChange.Remove<long, string>(1L),
+            BucketChange.Remove<long, string>(2L),
+        ]);
+
+        Assert.Equal(0, table.KeyCount);
+        Assert.False(table.ContainsKey(1L));
+        Assert.False(table.ContainsKey(2L));
+    }
+
+    [Fact]
+    public void RemoveThenAppend_SameKey_OneBatch_KeyReappears()
+    {
+        var table = new MultiValueSnapshotTable<long, string>();
+        table.Reset([KeyValuePair.Create(1L, (IReadOnlyList<string>)Enumerable.Range(0, Promote + 5).Select(i => $"e{i}").ToArray())]);
+
+        table.ApplyChanges(
+        [
+            BucketChange.Remove<long, string>(1L),
+            BucketChange.Append(1L, "reborn"),
+        ]);
+
+        Assert.Equal(1, table.KeyCount);
+        Assert.Equal(["reborn"], table.Lookup(1L));
+    }
+
+    [Fact]
+    public void AppendThenReplaceBucket_SameKey_OneBatch_LastChangeWins()
+    {
+        var table = new MultiValueSnapshotTable<long, string>();
+        table.Reset([KeyValuePair.Create(1L, (IReadOnlyList<string>)Enumerable.Range(0, Promote + 5).Select(i => $"e{i}").ToArray())]);
+
+        table.ApplyChanges(
+        [
+            BucketChange.Append(1L, "discarded"),
+            BucketChange.ReplaceBucket(1L, "fresh"),
+            BucketChange.Append(1L, "kept"),
+        ]);
+
+        Assert.Equal(1, table.KeyCount);
+        Assert.Equal(["fresh", "kept"], table.Lookup(1L));
+    }
+
+    [Fact]
+    public void PromotionMidBatch_ThenMoreAppends_FoldIntoOneBuilder()
+    {
+        // Grows an array bucket past the threshold and keeps appending in the same batch: the
+        // promote path must open a builder that later same-batch changes (including ReplaceAt)
+        // keep folding into.
+        var model = new List<string>();
+        var batch = new List<BucketChange<long, string>>();
+        for (int i = 0; model.Count < Promote + 100; i++)
+        {
+            var run = Enumerable.Range(0, 90).Select(j => $"e{model.Count + j}").ToArray();
+            model.AddRange(run);
+            batch.Add(BucketChange.Append(9L, run));
+        }
+        model[0] = "first";
+        model[^1] = "last";
+        batch.Add(BucketChange.ReplaceAt(9L, (0, "first"), (model.Count - 1, "last")));
+
+        var table = new MultiValueSnapshotTable<long, string>();
+        table.ApplyChanges(batch);
+
+        Assert.Equal(model, table.Lookup(9L));
+    }
+
+    [Fact]
     public void Reset_ReplacesEverything_AndClearEmpties()
     {
         var table = new MultiValueSnapshotTable<long, string>();

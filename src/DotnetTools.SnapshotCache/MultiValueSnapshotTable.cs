@@ -127,7 +127,10 @@ public sealed class MultiValueSnapshotTable<TKey, TEntity>
     public TableSnapshot GetSnapshot() => Volatile.Read(ref _current);
 
     /// <summary>Applies a batch of bucket changes as one atomic snapshot transition. Each touched
-    /// shard and bucket is copied at most once per batch; readers see the whole batch or none.</summary>
+    /// shard and bucket is copied at most once per batch; readers see the whole batch or none.
+    /// Successive <c>Append</c>/<c>ReplaceAt</c> changes to the same promoted (chunked) key fold
+    /// into one builder published once at the end of the batch — mirroring the secondary index's
+    /// per-batch builder cache (issue #31) — so N changes to a hot key cost one spine copy, not N.</summary>
     public void ApplyChanges(IEnumerable<BucketChange<TKey, TEntity>> changes)
     {
         ArgumentNullException.ThrowIfNull(changes);
@@ -137,49 +140,102 @@ public sealed class MultiValueSnapshotTable<TKey, TEntity>
             var shards = (Dictionary<TKey, object>[])snapshot.Shards.Clone();
             var owned = new bool[shards.Length];
             int keyCount = snapshot.KeyCount;
+            // Promoted buckets touched by this batch, mutated through one builder each. While a
+            // builder is open its key's shard entry (if any) is stale; every path below consults
+            // the builder map first, and the fold-back loop at the end replaces the stale entries.
+            Dictionary<TKey, ChunkedImmutableList<TEntity>.Builder>? building = null;
 
             foreach (var change in changes)
             {
-                int shardIndex = ShardOf(change.Key);
-                if (!owned[shardIndex])
-                {
-                    shards[shardIndex] = new Dictionary<TKey, object>(shards[shardIndex], _comparer);
-                    owned[shardIndex] = true;
-                }
-                var shard = shards[shardIndex];
+                var shard = GetWritableShard(shards, owned, change.Key);
                 switch (change.Kind)
                 {
                     case BucketChangeKind.Append:
                     {
+                        if (building is not null && building.TryGetValue(change.Key, out var pending))
+                        {
+                            pending.AddRange(change.Entities.AsSpan()); // O(chunk), no publish until batch end
+                            break;
+                        }
                         shard.TryGetValue(change.Key, out var existing);
                         if (existing is null)
                         {
                             keyCount++;
                         }
-                        shard[change.Key] = AppendToBucket(existing, change.Entities!);
+                        if (existing is ChunkedImmutableList<TEntity> chunked)
+                        {
+                            OpenBuilder(ref building, change.Key, chunked.ToBuilder())
+                                .AddRange(change.Entities.AsSpan());
+                        }
+                        else
+                        {
+                            var bucket = existing as TEntity[] ?? EmptyBucket;
+                            var entities = change.Entities!;
+                            if (bucket.Length + entities.Length > ArrayBucketMaxLength)
+                            {
+                                // Promote: one final whole copy into sub-LOH chunks; O(chunk)
+                                // appends from here on.
+                                var builder = OpenBuilder(ref building, change.Key,
+                                    ChunkedImmutableList<TEntity>.Empty.ToBuilder());
+                                builder.AddRange(bucket.AsSpan());
+                                builder.AddRange(entities.AsSpan());
+                            }
+                            else
+                            {
+                                var grown = new TEntity[bucket.Length + entities.Length];
+                                Array.Copy(bucket, grown, bucket.Length);
+                                Array.Copy(entities, 0, grown, bucket.Length, entities.Length);
+                                shard[change.Key] = grown;
+                            }
+                        }
                         break;
                     }
                     case BucketChangeKind.ReplaceAt:
                     {
+                        if (building is not null && building.TryGetValue(change.Key, out var pending))
+                        {
+                            foreach (var (index, value) in change.Replacements!)
+                            {
+                                pending[index] = value;
+                            }
+                            break;
+                        }
                         if (!shard.TryGetValue(change.Key, out var existing))
                         {
                             throw new KeyNotFoundException($"Cannot replace entities of unknown key '{change.Key}'.");
                         }
-                        shard[change.Key] = ReplaceInBucket(existing, change.Replacements!);
+                        if (existing is ChunkedImmutableList<TEntity> chunked)
+                        {
+                            var builder = OpenBuilder(ref building, change.Key, chunked.ToBuilder());
+                            foreach (var (index, value) in change.Replacements!)
+                            {
+                                builder[index] = value;
+                            }
+                        }
+                        else
+                        {
+                            shard[change.Key] = ReplaceInArrayBucket((TEntity[])existing, change.Replacements!);
+                        }
                         break;
                     }
                     case BucketChangeKind.ReplaceBucket:
                     {
-                        if (!shard.ContainsKey(change.Key))
+                        if (!shard.ContainsKey(change.Key) && building?.ContainsKey(change.Key) != true)
                         {
                             keyCount++;
                         }
+                        building?.Remove(change.Key); // pending appends discarded: last change wins
                         shard[change.Key] = MaterializeBucket(change.Entities!);
                         break;
                     }
                     case BucketChangeKind.Remove:
                     {
-                        if (shard.Remove(change.Key))
+                        bool had = shard.Remove(change.Key);
+                        if (building?.Remove(change.Key) == true)
+                        {
+                            had = true;
+                        }
+                        if (had)
                         {
                             keyCount--;
                         }
@@ -188,8 +244,38 @@ public sealed class MultiValueSnapshotTable<TKey, TEntity>
                 }
             }
 
+            if (building is not null)
+            {
+                foreach (var (key, builder) in building)
+                {
+                    GetWritableShard(shards, owned, key)[key] = builder.ToImmutable();
+                }
+            }
+
             Volatile.Write(ref _current, new TableSnapshot(this, shards, keyCount));
         }
+    }
+
+    private Dictionary<TKey, object> GetWritableShard(
+        Dictionary<TKey, object>[] shards, bool[] owned, TKey key)
+    {
+        int shardIndex = ShardOf(key);
+        if (!owned[shardIndex])
+        {
+            shards[shardIndex] = new Dictionary<TKey, object>(shards[shardIndex], _comparer);
+            owned[shardIndex] = true;
+        }
+        return shards[shardIndex];
+    }
+
+    /// <summary>Registers <paramref name="builder"/> as the batch's pending state for the key;
+    /// the stale shard entry (if any) is replaced when the batch folds builders back.</summary>
+    private ChunkedImmutableList<TEntity>.Builder OpenBuilder(
+        ref Dictionary<TKey, ChunkedImmutableList<TEntity>.Builder>? building,
+        TKey key, ChunkedImmutableList<TEntity>.Builder builder)
+    {
+        (building ??= new Dictionary<TKey, ChunkedImmutableList<TEntity>.Builder>(_comparer))[key] = builder;
+        return builder;
     }
 
     /// <summary>Atomically replaces the entire table content.</summary>
@@ -220,47 +306,8 @@ public sealed class MultiValueSnapshotTable<TKey, TEntity>
     /// <summary>Removes all keys and buckets.</summary>
     public void Clear() => Reset([]);
 
-    private static object AppendToBucket(object? existing, TEntity[] entities)
+    private static TEntity[] ReplaceInArrayBucket(TEntity[] bucket, (int Index, TEntity Value)[] replacements)
     {
-        switch (existing)
-        {
-            case ChunkedImmutableList<TEntity> chunked:
-            {
-                var builder = chunked.ToBuilder();
-                builder.AddRange(entities.AsSpan());
-                return builder.ToImmutable();
-            }
-            case TEntity[] bucket when bucket.Length + entities.Length > ArrayBucketMaxLength:
-            {
-                // Promote: one final whole copy into sub-LOH chunks; O(chunk) appends from here on.
-                var builder = ChunkedImmutableList<TEntity>.Empty.ToBuilder();
-                builder.AddRange(bucket.AsSpan());
-                builder.AddRange(entities.AsSpan());
-                return builder.ToImmutable();
-            }
-            default:
-            {
-                var bucket = existing as TEntity[] ?? EmptyBucket;
-                var grown = new TEntity[bucket.Length + entities.Length];
-                Array.Copy(bucket, grown, bucket.Length);
-                Array.Copy(entities, 0, grown, bucket.Length, entities.Length);
-                return grown;
-            }
-        }
-    }
-
-    private static object ReplaceInBucket(object existing, (int Index, TEntity Value)[] replacements)
-    {
-        if (existing is ChunkedImmutableList<TEntity> chunked)
-        {
-            var builder = chunked.ToBuilder();
-            foreach (var (index, value) in replacements)
-            {
-                builder[index] = value;
-            }
-            return builder.ToImmutable();
-        }
-        var bucket = (TEntity[])existing;
         var copy = new TEntity[bucket.Length];
         Array.Copy(bucket, copy, bucket.Length);
         foreach (var (index, value) in replacements)
