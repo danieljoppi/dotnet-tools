@@ -296,7 +296,10 @@ Everything so far keyed rows uniquely. A second production shape keeps **buckets
 key → a list of entities, with heavy skew (a few keys hold 10k–100k+ entities). An array of
 10,625+ references crosses the 85,000-byte LOH threshold, so every full-copy update of a hot
 bucket is a Large Object allocation. `SharedKeyBucketBenchmarks` + the `--bucket-loh` console
-study measure four bucket representations under one harness:
+study measure four bucket representations (plus the packaged `MultiValueSnapshotTable`, #8)
+under one harness:
+
+![Bucket LOH growth](results/charts/bucket-loh-growth.png)
 
 | Name | Store per shared key | Warm update |
 |---|---|---|
@@ -313,6 +316,10 @@ a reference array; 9 buckets sit past the LOH bar, 96 at N=10M). Warm batch: tou
 key either append 1–50 entities or replace ~1% of the bucket.
 
 ### Batch cost (BenchmarkDotNet, ShortRun, medians; state restored between iterations)
+
+![Bucket batch time](results/charts/bucket-batch-time.png)
+
+![Bucket batch allocation](results/charts/bucket-batch-alloc.png)
 
 | K / skew | ImmArray_AddRange | List_Then_PublishArray | ChunkedList_Builder | SnapshotTable_Rekeyed | MultiValueSnapshotTable (#8) |
 |---|---:|---:|---:|---:|---:|
@@ -403,6 +410,8 @@ approaches win everything): [`bucket-loh-1m-10k-zipf.txt`](results/raw/bucket-lo
   size — at the read cost measured in the table above.
 
 ### The read side — what the LOH win costs per lookup and per scan
+
+![Bucket read time](results/charts/bucket-read-time.png)
 
 Reads are the path a cache serves all day, so the batch/LOH tables above are only half the
 decision (ADR-0005). `BucketReadBenchmarks` measures the same populations read-only (no state
@@ -542,6 +551,59 @@ Two write/read-path refinements on top of the #7/#9/#10 work, measured with the 
   seeing 1–50 appends per touched key per batch, this removes O(changes) spine copies per hot
   group; consistency through mixed add/remove/move batches (including a bucket emptying out
   mid-batch) is covered by `HybridIndexBucketTests`.
+
+## 13. 100 warm batches: p50/p95, Server GC, and what the LOH looks like after an hour-shaped run
+
+The 10-batch studies above show the mechanism; this is the endurance version (issue #12): **100
+warm batches** per approach, workstation *and* Server GC, with real p50/p95 per batch. Buckets
+grow as batches accumulate, so this is also the honest "what does month-two look like" shape.
+Raw: [`bucket-loh-10m-10k-zipf-100c.txt`](results/raw/bucket-loh-10m-10k-zipf-100c.txt),
+[`-servergc`](results/raw/bucket-loh-10m-10k-zipf-100c-servergc.txt) (and the 1M pair).
+
+10M entities, K=10k Zipf, 100 batches:
+
+| Approach | p50 / p95 (Workstation) | p50 / p95 (Server) | **Uncompacted LOH after 100 batches (Wks / Server)** | Alloc/batch |
+|---|---:|---:|---:|---:|
+| ImmArray_AddRange | 43.9 / 241.1 ms | 13.3 / 27.1 ms | **493 MiB / 664 MiB** | 30.1 MiB |
+| List_Then_PublishArray | 13.7 / 206.7 ms | 14.6 / 28.6 ms | **1,121 MiB / 1,424 MiB** | 31.3 MiB |
+| ChunkedList_Builder | 27.6 / 70.2 ms | **5.7 / 25.8 ms** | 2.3 MiB / 1.6 MiB | 15.1 MiB |
+| SnapshotTable_Rekeyed | 119.4 / 425.3 ms | 34.8 / 134.3 ms | 7.2 MiB / 30.3 MiB | 40.2 MiB |
+| MultiValueSnapshotTable | 33.4 / 77.8 ms | **5.2 / 54.2 ms** | 1.7 MiB / 1.6 MiB | 15.2 MiB |
+
+What 100 cycles add to the 10-cycle story:
+
+- **The array approaches' LOH debt compounds.** At 10 batches the uncompacted step was ~292/407
+  MiB; at 100 batches `List_Then_PublishArray` is sitting on **1.1 GiB (workstation) / 1.4 GiB
+  (Server)** of dead-but-resident large objects — Server GC makes it *worse*, because background
+  GC feels even less pressure to collect the LOH. Reclaiming it took a 0.9–2.8 s forced
+  compacting pause. The chunked structures' equivalents: 1.6–7 MiB.
+- **Server GC is the production recommendation for every approach** — batch p50 drops 2–5×
+  across the board (rekeyed 119 → 35 ms, chunked 28 → 5.7 ms) because background GC absorbs the
+  Gen0/Gen1 churn — but it does not fix the array approaches' LOH accumulation; only the
+  allocation shape does.
+- **p95 vs p50 is where the GC tax shows.** Workstation chunked p50 is sub-ms at 1M yet p95 is
+  ~12 ms — those are the batches that ate an ephemeral GC. Under Server GC the 1M p95 falls to
+  ~4–5 ms. The rekeyed table's p95 remains the weakest number (#11's remaining gap).
+
+The same run at 1M entities shows the identical pattern at smaller magnitude
+(`List` 81 MiB uncompacted after 100 batches on workstation, chunked/table/multi-value 0.0).
+
+### #11 addendum: chunk size is *not* the rekeyed bottleneck
+
+Hypothesis tested: since a group's entities load adjacently, a rekeyed batch's replacements
+cluster, so larger row chunks might cut copy count. An **interleaved A/B** (default 128-row
+chunks vs 2048-row, two rounds each, 20 batches, 10M Zipf —
+[`bucket-loh-10m-ab-chunkrows.txt`](results/raw/bucket-loh-10m-ab-chunkrows.txt)) falsifies it:
+
+| ChunkRows | p50 (round 1 / 2) | Alloc/batch | Retained by held snapshot |
+|---|---:|---:|---:|
+| 128 (adaptive default) | 95.8 / 94.2 ms | **39.8 MiB** | **283 MiB** |
+| 2048 | 93.7 / 98.5 ms | 53.2 MiB (+34%) | 308 MiB (+9%) |
+
+Wall time is identical within noise while bigger chunks cost more on both memory axes — the
+adaptive default stands, and the earlier one-shot runs suggesting a 3× chunk-size win were VM
+drift (which is why A/Bs here must interleave). #11's remaining gap vs the raw bucket stores is
+therefore in the per-entity index probing/bookkeeping, not row-chunk geometry.
 
 ## Reproducing
 
