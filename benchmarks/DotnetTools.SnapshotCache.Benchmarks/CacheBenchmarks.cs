@@ -251,6 +251,14 @@ public class InitialLoadBenchmarks
         return table;
     }
 
+    [Benchmark(Description = "SnapshotTable.ResetParallel")]
+    public object SnapshotTable_LoadParallel()
+    {
+        var table = new SnapshotTable<long, long>(capacityHint: N);
+        table.ResetParallel(_rows);
+        return table;
+    }
+
     [Benchmark(Description = "ImmutableList.CreateRange")]
     public object ImmutableList_Load() => ImmutableList.CreateRange(_rows);
 
