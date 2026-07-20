@@ -166,6 +166,25 @@ public class BucketReadBenchmarks
         return sum;
     }
 
+    [Benchmark(Description = "ChunkedList scan via Chunks spans (1M entities)")]
+    public long ChunkedList_ScanViaChunks()
+    {
+        // The #22 chunk-span path: each bucket scanned as tight span loops instead of the
+        // per-element enumerator — one MoveNext per chunk, not per entity.
+        long sum = 0;
+        foreach (var bucket in _chunked)
+        {
+            foreach (var span in bucket.Chunks)
+            {
+                for (int i = 0; i < span.Length; i++)
+                {
+                    sum += span[i].Kind;
+                }
+            }
+        }
+        return sum;
+    }
+
     [Benchmark(Description = "ImmList scan all buckets (1M entities)")]
     public long ImmList_ScanAllBuckets()
     {

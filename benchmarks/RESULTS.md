@@ -431,8 +431,8 @@ restore → stable timings, zero allocation on every row):
 |---|---:|---:|---:|---:|
 | 10k random indexed reads, hot-weighted (Zipf) | **136 μs (~14 ns)** | 310 μs (~31 ns, 2.3×) | 1,791 μs (~179 ns)³ | 700 μs (~70 ns)⁵ |
 | 10k random indexed reads (Uniform) | **183 μs (~18 ns)** | 385 μs (~38 ns, 2.1×) | 1,884 μs (~188 ns)³ | 597 μs (~60 ns)⁵ |
-| Scan all 1M entities (Zipf) | **4.5 ms (~4.5 ns/entity)** | 4.7 ms (~4.7 ns, 1.05×) | 137 ms via group index⁴ | 9.5 ms⁵ |
-| Scan all 1M entities (Uniform) | **4.5 ms (~4.5 ns/entity)** | 5.6 ms (~5.6 ns, 1.25×) | 149 ms via group index⁴ | 5.2 ms⁵ |
+| Scan all 1M entities (Zipf) | **4.8 ms (~4.8 ns/entity)** | 5.4 ms enumerator / **5.0 ms via `Chunks` (1.04×)**⁶ | 137 ms via group index⁴ | 9.5 ms⁵ |
+| Scan all 1M entities (Uniform) | **4.3 ms (~4.3 ns/entity)** | 5.5 ms enumerator / **4.5 ms via `Chunks` (1.03×)**⁶ | 149 ms via group index⁴ | 5.2 ms⁵ |
 
 ³ Table-lookup timings carried a wide error band in this run (±2 ms); §2's steadier measurement
 puts the per-lookup cost at ~60–120 ns. The 4–10× ratio band vs a contiguous array is the signal.
@@ -448,13 +448,20 @@ and scans land between the array and doubled-chunked cost depending on how many 
 promoted buckets. A typed scan API (pattern-matching the concrete bucket) is the obvious
 follow-up if scan-heavy consumers adopt the packaged type.
 
+⁶ Issue #22: `ChunkedImmutableList.Chunks` yields each chunk as a `ReadOnlySpan<T>`, so a scan
+runs as a handful of tight span loops (one `MoveNext` per chunk) instead of the per-element
+`IEnumerator` (one `MoveNext` + `Current` per entity). That closes the scan gap vs a contiguous
+`ImmutableArray` from ~1.1–1.25× to **~1.03–1.04×** — the layout was never the cost, the
+per-element call overhead was. `CopyTo(Span)` and a fast `ToArray()` are built on the same path.
+
 Raw: [`BucketReadBenchmarks-report-github.md`](results/raw/DotnetTools.SnapshotCache.Benchmarks.BucketReadBenchmarks-report-github.md).
 (Re-measured after issues #7/#9; the array/chunked ratios were identical before — the compact
 representation does not touch the read path.)
 
 How to read it: the chunked list's three-array-hop indexer costs ~2–2.5× a contiguous array on
-random access, and sequential scans — the aggregation/report path — pay 1.06–1.5× because the
-enumerator only re-resolves a chunk every 512 elements. The rekeyed table pays the full
+random access; sequential scans through the **`Chunks` span path (#22)** run at ~1.03–1.04× the
+contiguous array (the per-element enumerator was 1.1–1.25× — the span loop removes that overhead).
+The rekeyed table pays the full
 shard-directory + chunk hop per lookup and cannot enumerate one group at all without the
 secondary index (#9). None of the read premiums allocate. This is the quantified case for the
 hybrid recommendation below: keep small buckets as arrays (best reads, LOH unreachable), pay the
