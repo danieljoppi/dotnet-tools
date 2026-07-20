@@ -321,6 +321,16 @@ public sealed class ChunkedImmutableList<T> : IReadOnlyList<T>
             }
         }
 
+        /// <summary>Appends an array via the bulk span path. This exact-match overload exists for
+        /// callers on C# 12 (the .NET 8 default), where an array argument is otherwise ambiguous
+        /// between the span and enumerable overloads (CS0121) — C# 14's first-class span
+        /// conversions resolve it, but the library must compile from LTS toolchains too.</summary>
+        public void AddRange(T[] items)
+        {
+            ArgumentNullException.ThrowIfNull(items);
+            AddRange(items.AsSpan());
+        }
+
         /// <summary>Appends a sequence; arrays and lists take the bulk span path.</summary>
         public void AddRange(IEnumerable<T> items)
         {

@@ -136,7 +136,7 @@ Not recommended, and not built here, deliberately:
 ## Layout
 
 ```
-src/DotnetTools.SnapshotCache/           the library (net10.0, zero dependencies)
+src/DotnetTools.SnapshotCache/           the library (net8.0;net10.0, zero dependencies)
 tests/DotnetTools.SnapshotCache.Tests/   xUnit: correctness, fuzz-vs-model, snapshot isolation,
                                          concurrency stress, LOH + performance guardrails (41 tests)
 benchmarks/DotnetTools.SnapshotCache.Benchmarks/   BenchmarkDotNet comparisons
