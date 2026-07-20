@@ -41,7 +41,9 @@ if (args.Length > 0 && args[0] == "--bucket-loh")
         entities: args.Length > 1 ? int.Parse(args[1]) : 1_000_000,
         buckets: args.Length > 2 ? int.Parse(args[2]) : 10_000,
         skew: args.Length > 3 ? args[3] : "zipf",
-        cycles: args.Length > 4 ? int.Parse(args[4]) : 10);
+        cycles: args.Length > 4 ? int.Parse(args[4]) : 10,
+        tableChunkRows: args.Length > 5 ? int.Parse(args[5]) : 0,
+        onlyApproach: args.Length > 6 ? args[6] : null);
     return;
 }
 

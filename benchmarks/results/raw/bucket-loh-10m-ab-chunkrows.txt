@@ -1,0 +1,41 @@
+# Interleaved ChunkRows A/B, SnapshotTable_Rekeyed only: default(128) vs 2048, two rounds each
+
+## ab2-default-1
+# Bucket LOH study: 10,000,000 entities, 10,000 shared keys, Zipf sizes, 20 warm batches, ~100 keys touched per batch
+Largest bucket: 1,021,700 entities (7982 KB as a reference array); 96 bucket(s) past the 85 KB LOH threshold. GC: Workstation.
+
+| Approach | Heap after build | LOH after build | Batch p50 | Batch p95 | Batch max | Alloc/batch | Gen0/1/2 | LOH after cycles (uncompacted) | LOH after Gen2+compact | Gen2+compact pause | Heap growth (dropped) | Extra retained by held snapshot |
+|---|---:|---:|---:|---:|---:|---:|---|---:|---:|---:|---:|---:|
+| SnapshotTable_Rekeyed | 1759.6 MiB | 0.0 MiB | 95.8 ms | 203.9 ms | 203.9 ms | 39.8 MiB | 51/50/1 | 0.0 MiB | 0.0 MiB | 2263 ms | 4.3 MiB | 283.0 MiB |
+
+Reading guide: 'LOH after cycles (uncompacted)' is what the process actually keeps resident between batches without a compacting Gen2 (which .NET does not run on its own unless pressured); the compacted column is the live large-object bytes. 'Extra retained' is the heap cost of pinning the pre-cycle snapshot through all batches.
+
+## ab2-2048-1
+# Bucket LOH study: 10,000,000 entities, 10,000 shared keys, Zipf sizes, 20 warm batches, ~100 keys touched per batch
+Largest bucket: 1,021,700 entities (7982 KB as a reference array); 96 bucket(s) past the 85 KB LOH threshold. GC: Workstation, SnapshotTable_Rekeyed ChunkRows=2048.
+
+| Approach | Heap after build | LOH after build | Batch p50 | Batch p95 | Batch max | Alloc/batch | Gen0/1/2 | LOH after cycles (uncompacted) | LOH after Gen2+compact | Gen2+compact pause | Heap growth (dropped) | Extra retained by held snapshot |
+|---|---:|---:|---:|---:|---:|---:|---|---:|---:|---:|---:|---:|
+| SnapshotTable_Rekeyed | 1757.4 MiB | 0.0 MiB | 93.7 ms | 190.5 ms | 190.5 ms | 53.2 MiB | 67/66/1 | 0.0 MiB | 0.0 MiB | 2185 ms | 4.4 MiB | 308.6 MiB |
+
+Reading guide: 'LOH after cycles (uncompacted)' is what the process actually keeps resident between batches without a compacting Gen2 (which .NET does not run on its own unless pressured); the compacted column is the live large-object bytes. 'Extra retained' is the heap cost of pinning the pre-cycle snapshot through all batches.
+
+## ab2-default-2
+# Bucket LOH study: 10,000,000 entities, 10,000 shared keys, Zipf sizes, 20 warm batches, ~100 keys touched per batch
+Largest bucket: 1,021,700 entities (7982 KB as a reference array); 96 bucket(s) past the 85 KB LOH threshold. GC: Workstation.
+
+| Approach | Heap after build | LOH after build | Batch p50 | Batch p95 | Batch max | Alloc/batch | Gen0/1/2 | LOH after cycles (uncompacted) | LOH after Gen2+compact | Gen2+compact pause | Heap growth (dropped) | Extra retained by held snapshot |
+|---|---:|---:|---:|---:|---:|---:|---|---:|---:|---:|---:|---:|
+| SnapshotTable_Rekeyed | 1759.6 MiB | 0.0 MiB | 94.2 ms | 212.2 ms | 212.2 ms | 39.8 MiB | 51/50/1 | 0.0 MiB | 0.0 MiB | 2354 ms | 4.3 MiB | 282.6 MiB |
+
+Reading guide: 'LOH after cycles (uncompacted)' is what the process actually keeps resident between batches without a compacting Gen2 (which .NET does not run on its own unless pressured); the compacted column is the live large-object bytes. 'Extra retained' is the heap cost of pinning the pre-cycle snapshot through all batches.
+
+## ab2-2048-2
+# Bucket LOH study: 10,000,000 entities, 10,000 shared keys, Zipf sizes, 20 warm batches, ~100 keys touched per batch
+Largest bucket: 1,021,700 entities (7982 KB as a reference array); 96 bucket(s) past the 85 KB LOH threshold. GC: Workstation, SnapshotTable_Rekeyed ChunkRows=2048.
+
+| Approach | Heap after build | LOH after build | Batch p50 | Batch p95 | Batch max | Alloc/batch | Gen0/1/2 | LOH after cycles (uncompacted) | LOH after Gen2+compact | Gen2+compact pause | Heap growth (dropped) | Extra retained by held snapshot |
+|---|---:|---:|---:|---:|---:|---:|---|---:|---:|---:|---:|---:|
+| SnapshotTable_Rekeyed | 1757.3 MiB | 0.0 MiB | 98.5 ms | 181.4 ms | 181.4 ms | 53.2 MiB | 67/66/1 | 0.0 MiB | 0.0 MiB | 2245 ms | 4.4 MiB | 308.3 MiB |
+
+Reading guide: 'LOH after cycles (uncompacted)' is what the process actually keeps resident between batches without a compacting Gen2 (which .NET does not run on its own unless pressured); the compacted column is the live large-object bytes. 'Extra retained' is the heap cost of pinning the pre-cycle snapshot through all batches.

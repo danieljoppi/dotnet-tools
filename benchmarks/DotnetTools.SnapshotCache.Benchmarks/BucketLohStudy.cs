@@ -29,7 +29,8 @@ public static class BucketLohStudy
     private static readonly string[] Approaches =
         ["ImmArray_AddRange", "List_Then_PublishArray", "ChunkedList_Builder", "SnapshotTable_Rekeyed", "MultiValue_Table"];
 
-    public static void Run(int entities, int buckets, string skew, int cycles)
+    public static void Run(
+        int entities, int buckets, string skew, int cycles, int tableChunkRows = 0, string? onlyApproach = null)
     {
         var profile = skew.ToLowerInvariant() switch
         {
@@ -50,14 +51,18 @@ public static class BucketLohStudy
         Console.WriteLine($"Largest bucket: {sizes.Max():N0} entities " +
                           $"({(long)sizes.Max() * IntPtr.Size / 1024.0:F0} KB as a reference array); " +
                           $"{lohBuckets} bucket(s) past the 85 KB LOH threshold. " +
-                          $"GC: {(System.Runtime.GCSettings.IsServerGC ? "Server" : "Workstation")}.");
+                          $"GC: {(System.Runtime.GCSettings.IsServerGC ? "Server" : "Workstation")}" +
+                          (tableChunkRows > 0 ? $", SnapshotTable_Rekeyed ChunkRows={tableChunkRows}" : "") + ".");
         Console.WriteLine();
-        Console.WriteLine("| Approach | Heap after build | LOH after build | Batch median | Batch max | Alloc/batch | Gen0/1/2 | LOH after cycles (uncompacted) | LOH after Gen2+compact | Gen2+compact pause | Heap growth (dropped) | Extra retained by held snapshot |");
-        Console.WriteLine("|---|---:|---:|---:|---:|---:|---|---:|---:|---:|---:|---:|");
+        Console.WriteLine("| Approach | Heap after build | LOH after build | Batch p50 | Batch p95 | Batch max | Alloc/batch | Gen0/1/2 | LOH after cycles (uncompacted) | LOH after Gen2+compact | Gen2+compact pause | Heap growth (dropped) | Extra retained by held snapshot |");
+        Console.WriteLine("|---|---:|---:|---:|---:|---:|---:|---|---:|---:|---:|---:|---:|");
 
         foreach (string approach in Approaches)
         {
-            RunApproach(approach, sizes, entities, touchCount, weighted, cycles);
+            if (onlyApproach is null || approach.Contains(onlyApproach, StringComparison.OrdinalIgnoreCase))
+            {
+                RunApproach(approach, sizes, entities, touchCount, weighted, cycles, tableChunkRows);
+            }
         }
 
         Console.WriteLine();
@@ -68,13 +73,13 @@ public static class BucketLohStudy
     }
 
     private static void RunApproach(
-        string approach, int[] sizes, int entities, int touchCount, bool weighted, int cycles)
+        string approach, int[] sizes, int entities, int touchCount, bool weighted, int cycles, int tableChunkRows)
     {
         ForceCompactingGc();
         long heap0 = GC.GetTotalMemory(forceFullCollection: true);
         long loh0 = LohBytes();
 
-        var store = BuildStore(approach, sizes, entities);
+        var store = BuildStore(approach, sizes, entities, tableChunkRows);
         ForceCompactingGc();
         long heapBuilt = GC.GetTotalMemory(forceFullCollection: true) - heap0;
         long lohBuilt = LohBytes() - loh0;
@@ -121,7 +126,7 @@ public static class BucketLohStudy
         long heapGrowth = heapFinal - heap0 - heapBuilt;
 
         Console.WriteLine(
-            $"| {approach} | {Mib(heapBuilt)} | {Mib(lohBuilt)} | {Median(times):F1} ms | {times.Max():F1} ms " +
+            $"| {approach} | {Mib(heapBuilt)} | {Mib(lohBuilt)} | {Percentile(times, 50):F1} ms | {Percentile(times, 95):F1} ms | {times.Max():F1} ms " +
             $"| {Mib(allocated / cycles)} | {gen0}/{gen1}/{gen2} | {Mib(lohUncompacted)} | {Mib(lohCompacted)} " +
             $"| {compactPauseMs:F0} ms | {Mib(heapGrowth)} | {Mib(retainedByHolding)} |");
 
@@ -130,10 +135,11 @@ public static class BucketLohStudy
 
     private static string Mib(long bytes) => $"{bytes / 1_048_576.0:F1} MiB";
 
-    private static double Median(List<double> values)
+    private static double Percentile(List<double> values, int percentile)
     {
         var sorted = values.Order().ToArray();
-        return sorted[sorted.Length / 2];
+        int rank = Math.Min(sorted.Length - 1, sorted.Length * percentile / 100);
+        return sorted[rank];
     }
 
     private static void ForceCompactingGc()
@@ -153,7 +159,7 @@ public static class BucketLohStudy
         return info.GenerationInfo.Length > 3 ? info.GenerationInfo[3].SizeAfterBytes : 0;
     }
 
-    private static IBucketStore BuildStore(string approach, int[] sizes, int entities)
+    private static IBucketStore BuildStore(string approach, int[] sizes, int entities, int tableChunkRows)
     {
         var pristine = BucketWorkload.BuildBuckets(sizes);
         return approach switch
@@ -161,7 +167,7 @@ public static class BucketLohStudy
             "ImmArray_AddRange" => new ImmArrayStore(pristine),
             "List_Then_PublishArray" => new ListPublishStore(pristine),
             "ChunkedList_Builder" => new ChunkedStore(pristine),
-            "SnapshotTable_Rekeyed" => new TableStore(pristine, entities),
+            "SnapshotTable_Rekeyed" => new TableStore(pristine, entities, tableChunkRows),
             "MultiValue_Table" => new MultiValueStore(pristine),
             _ => throw new ArgumentException(approach),
         };
@@ -290,9 +296,15 @@ public static class BucketLohStudy
     {
         private readonly SnapshotTable<(long GroupId, long EntityId), Entity> _table;
 
-        public TableStore(Entity[][] pristine, int entities)
+        public TableStore(Entity[][] pristine, int entities, int chunkRows = 0)
         {
-            _table = new SnapshotTable<(long, long), Entity>(capacityHint: entities);
+            // chunkRows overrides the adaptive default — same-group rows load adjacently, so
+            // rekeyed batches touching whole groups can favor larger chunks (issue #11 A/B).
+            _table = new SnapshotTable<(long, long), Entity>(new SnapshotTableOptions<(long, long)>
+            {
+                CapacityHint = entities,
+                ChunkRows = chunkRows,
+            });
             _table.Reset(pristine.SelectMany(b => b.Select(e => KeyValuePair.Create((e.GroupId, e.Id), e))));
         }
 

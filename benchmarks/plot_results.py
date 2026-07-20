@@ -188,3 +188,158 @@ def plot_memory_footprint():
 
 
 plot_memory_footprint()
+
+
+# --- Shared-key bucket workloads (issue #6 / RESULTS.md §9) ---
+
+RAW = Path("benchmarks/results/raw")
+if not RAW.exists():
+    RAW = Path("results/raw")
+
+LOH_SAFE = ("ChunkedList", "SnapshotTable", "MultiValue")
+
+
+def load_bucket_csv(csv_name, param_filter):
+    """Rows from a committed bucket-benchmark CSV matching the given param values."""
+    path = RAW / csv_name
+    if not path.exists():
+        return []
+    rows = []
+    with path.open() as f:
+        for row in csv.DictReader(f):
+            if all(row.get(k, "").strip() == v for k, v in param_filter.items()):
+                rows.append(
+                    {
+                        "method": row["Method"].strip("'"),
+                        "mean_ms": parse_quantity(row.get("Median") or row["Mean"], TIME_UNITS),
+                        "alloc_mb": parse_quantity(row.get("Allocated", ""), SIZE_UNITS),
+                        "gen2": float(row.get("Gen2", "0") or 0),
+                    }
+                )
+    return rows
+
+
+def parse_loh_study(txt_name, column):
+    """Approach → MiB value of one column in a --bucket-loh markdown table."""
+    path = RAW / txt_name
+    if not path.exists():
+        return {}
+    header, values = [], {}
+    for line in path.read_text().splitlines():
+        if not line.startswith("|"):
+            continue
+        cells = [c.strip() for c in line.strip("|").split("|")]
+        if cells and cells[0] == "Approach":
+            header = cells
+        elif header and len(cells) == len(header) and not set(cells[0]) <= {"-", ":", " "}:
+            row = dict(zip(header, cells))
+            if column in row:
+                values[row["Approach"]] = float(row[column].replace("MiB", "").strip())
+    return values
+
+
+def plot_bucket_loh():
+    """The §9 money chart: uncompacted LOH growth after warm batches, 1M vs 10M entities."""
+    small = parse_loh_study("bucket-loh-1m-10k-zipf.txt", "LOH after cycles (uncompacted)")
+    large = parse_loh_study("bucket-loh-10m-10k-zipf.txt", "LOH after cycles (uncompacted)")
+    if not small or not large:
+        print("bucket LOH study files not found; skipping bucket LOH chart")
+        return
+    approaches = [a for a in small if a in large]
+    y = range(len(approaches))
+    fig, ax = plt.subplots(figsize=(9, 0.9 * len(approaches) + 1.8), dpi=160)
+    fig.patch.set_facecolor(SURFACE)
+    ax.set_facecolor(SURFACE)
+    LOH_COLOR = "#eb6834"
+    SAFE = "#2a78d6"
+    for offset, (values, alpha, label) in enumerate(
+        [(small, 0.55, "1M entities"), (large, 1.0, "10M entities")]
+    ):
+        vals = [values[a] for a in approaches]
+        colors = [SAFE if any(t in a for t in LOH_SAFE) else LOH_COLOR for a in approaches]
+        bars = ax.barh(
+            [i + (0.2 if offset == 0 else -0.2) for i in y], vals, height=0.36,
+            color=colors, alpha=alpha, zorder=3, label=label)
+        for bar, v in zip(bars, vals):
+            ax.text(bar.get_width() + max(large.values()) * 0.012,
+                    bar.get_y() + bar.get_height() / 2,
+                    f"{v:,.1f} MiB", va="center", ha="left", color=INK, fontsize=9)
+    ax.set_yticks(list(y), approaches, color=INK, fontsize=10)
+    ax.xaxis.grid(True, color=GRID, linewidth=0.8, zorder=0)
+    ax.set_axisbelow(True)
+    for spine in ("top", "right", "left"):
+        ax.spines[spine].set_visible(False)
+    ax.spines["bottom"].set_color(GRID)
+    ax.tick_params(colors=MUTED, labelsize=9)
+    ax.set_xlabel("uncompacted LOH growth after warm batches (MiB) — Zipf buckets, K=10k — shorter is better",
+                  color=MUTED, fontsize=9)
+    ax.set_title("Shared-key buckets: what each representation leaves on the Large Object Heap",
+                 color=INK, fontsize=12, loc="left", pad=14, fontweight="bold")
+    ax.set_xlim(right=max(large.values()) * 1.30)
+    ax.legend(loc="lower right", frameon=False, fontsize=9, labelcolor=INK)
+    fig.tight_layout()
+    fig.savefig(OUT / "bucket-loh-growth.png", facecolor=SURFACE, bbox_inches="tight")
+    plt.close(fig)
+    print(f"wrote {OUT / 'bucket-loh-growth.png'}")
+
+
+def barh_buckets(rows, value_key, title, xlabel, out_name, fmt, log=False):
+    rows = [r for r in rows if r[value_key] is not None]
+    if not rows:
+        print(f"no rows for {out_name}; skipping")
+        return
+    rows.sort(key=lambda r: r[value_key], reverse=True)
+    labels = [r["method"] for r in rows]
+    values = [r[value_key] for r in rows]
+    colors = [ACCENT if any(t in l for t in LOH_SAFE) else CONTEXT for l in labels]
+    fig, ax = plt.subplots(figsize=(9, 0.62 * len(rows) + 1.6), dpi=160)
+    fig.patch.set_facecolor(SURFACE)
+    ax.set_facecolor(SURFACE)
+    bars = ax.barh(labels, values, color=colors, height=0.62, zorder=3)
+    if log:
+        ax.set_xscale("log")
+    ax.xaxis.grid(True, color=GRID, linewidth=0.8, zorder=0)
+    ax.set_axisbelow(True)
+    for spine in ("top", "right", "left"):
+        ax.spines[spine].set_visible(False)
+    ax.spines["bottom"].set_color(GRID)
+    ax.tick_params(colors=MUTED, labelsize=9)
+    for tick in ax.get_yticklabels():
+        tick.set_color(INK)
+        tick.set_fontsize(10)
+    ax.set_xlabel(xlabel, color=MUTED, fontsize=9)
+    ax.set_title(title, color=INK, fontsize=12, loc="left", pad=14, fontweight="bold")
+    span = max(values)
+    for bar, row in zip(bars, rows):
+        ax.text(bar.get_width() * (1.06 if log else 1.0) + (0 if log else span * 0.012),
+                bar.get_y() + bar.get_height() / 2, fmt(row[value_key]),
+                va="center", ha="left", color=INK, fontsize=9)
+    ax.set_xlim(right=span * (2.2 if log else 1.30))
+    fig.tight_layout()
+    fig.savefig(OUT / out_name, facecolor=SURFACE, bbox_inches="tight")
+    plt.close(fig)
+    print(f"wrote {OUT / out_name}")
+
+
+plot_bucket_loh()
+
+zipf = load_bucket_csv(
+    "DotnetTools.SnapshotCache.Benchmarks.SharedKeyBucketBenchmarks-report.csv",
+    {"N": "1000000", "K": "10000", "Skew": "Zipf"})
+barh_buckets(zipf, "mean_ms",
+             "Warm bucket batch, 1M entities over 10k Zipf keys — time (median)",
+             "median time per batch (ms, log scale) — shorter is better",
+             "bucket-batch-time.png", ms, log=True)
+barh_buckets(zipf, "alloc_mb",
+             "Warm bucket batch, 1M entities over 10k Zipf keys — allocation",
+             "allocated per batch (MB) — shorter is better",
+             "bucket-batch-alloc.png", mb)
+
+bucket_reads = load_bucket_csv(
+    "DotnetTools.SnapshotCache.Benchmarks.BucketReadBenchmarks-report.csv",
+    {"N": "1000000", "K": "10000", "Skew": "Zipf"})
+indexed = [r for r in bucket_reads if "x10k" in r["method"]]
+barh_buckets(indexed, "mean_ms",
+             "10,000 hot-weighted indexed bucket reads, Zipf — time",
+             "mean time per 10k reads (ms, log scale) — shorter is better",
+             "bucket-read-time.png", ms, log=True)
