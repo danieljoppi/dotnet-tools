@@ -36,51 +36,61 @@ internal abstract class IndexState<TKey, TValue>
 }
 
 /// <summary>
-/// Snapshot state of one secondary index: index key → array of primary keys, stored as a fixed
-/// number of copy-on-write dictionary shards. Buckets are plain arrays, copied on change — suited
-/// to bucket sizes up to the low thousands of keys (a bucket stays below the LOH threshold up to
-/// ~10k 8-byte keys). Designed for moderate-cardinality attributes (region, status, tier, ...).
+/// Snapshot state of one secondary index: index key → list of primary keys, stored as a fixed
+/// number of copy-on-write dictionary shards. Buckets are hybrid (ADR-0006): plain arrays while
+/// small — the best read/scan representation, copied whole on change — and
+/// <see cref="ChunkedImmutableList{T}"/> once they cross <see cref="ArrayBucketMaxLength"/>
+/// elements, so hot one-to-many groups (10k–100k+ members) update at O(chunk) cost and no index
+/// bucket ever becomes a Large Object Heap array.
 /// </summary>
 internal sealed class IndexState<TKey, TValue, TIndexKey> : IndexState<TKey, TValue>
     where TKey : notnull
     where TIndexKey : notnull
 {
+    // Above this element count an array bucket is promoted to a chunked list: each further
+    // membership change stops copying the whole bucket (8 KB at 1024 8-byte keys, and O(n)
+    // per change) and starts copying one chunk + spine. Well below the ~10,625-reference LOH bar.
+    internal const int ArrayBucketMaxLength = 1024;
+
     private readonly TableIndex<TKey, TValue, TIndexKey> _definition;
-    private readonly Dictionary<TIndexKey, TKey[]>[] _shards;
+    // Bucket is TKey[] (small) or ChunkedImmutableList<TKey> (promoted) — both IReadOnlyList<TKey>.
+    private readonly Dictionary<TIndexKey, object>[] _shards;
     private readonly int _shardMask;
 
     internal IndexState(TableIndex<TKey, TValue, TIndexKey> definition, int shardCount)
     {
         _definition = definition;
-        _shards = new Dictionary<TIndexKey, TKey[]>[shardCount];
+        _shards = new Dictionary<TIndexKey, object>[shardCount];
         Array.Fill(_shards, EmptyShard);
         _shardMask = shardCount - 1;
     }
 
-    private IndexState(TableIndex<TKey, TValue, TIndexKey> definition, Dictionary<TIndexKey, TKey[]>[] shards)
+    private IndexState(TableIndex<TKey, TValue, TIndexKey> definition, Dictionary<TIndexKey, object>[] shards)
     {
         _definition = definition;
         _shards = shards;
         _shardMask = shards.Length - 1;
     }
 
-    private static readonly Dictionary<TIndexKey, TKey[]> EmptyShard = [];
+    private static readonly Dictionary<TIndexKey, object> EmptyShard = [];
     private static readonly TKey[] EmptyBucket = [];
 
     private int ShardOf(TIndexKey key) =>
         (int)((uint)(_definition.Comparer.GetHashCode(key) * -1640531527) >> 16) & _shardMask;
 
-    internal TKey[] Lookup(TIndexKey indexKey) =>
-        _shards[ShardOf(indexKey)].TryGetValue(indexKey, out var bucket) ? bucket : EmptyBucket;
+    internal IReadOnlyList<TKey> Lookup(TIndexKey indexKey) =>
+        _shards[ShardOf(indexKey)].TryGetValue(indexKey, out var bucket)
+            ? (IReadOnlyList<TKey>)bucket
+            : EmptyBucket;
 
     private sealed class Writer
     {
-        internal required Dictionary<TIndexKey, TKey[]>[] Shards;
+        internal required Dictionary<TIndexKey, object>[] Shards;
         internal required bool[] Owned;
     }
 
     internal override object CreateWriter() =>
-        new Writer { Shards = (Dictionary<TIndexKey, TKey[]>[])_shards.Clone(), Owned = new bool[_shards.Length] };
+        new Writer { Shards = (Dictionary<TIndexKey, object>[])_shards.Clone(), Owned = new bool[_shards.Length] };
 
     internal override IndexState<TKey, TValue> Freeze(object writerState) =>
         new IndexState<TKey, TValue, TIndexKey>(_definition, ((Writer)writerState).Shards);
@@ -105,12 +115,12 @@ internal sealed class IndexState<TKey, TValue, TIndexKey> : IndexState<TKey, TVa
         }
     }
 
-    private Dictionary<TIndexKey, TKey[]> GetWritableShard(Writer writer, TIndexKey indexKey)
+    private Dictionary<TIndexKey, object> GetWritableShard(Writer writer, TIndexKey indexKey)
     {
         int shardIndex = ShardOf(indexKey);
         if (!writer.Owned[shardIndex])
         {
-            writer.Shards[shardIndex] = new Dictionary<TIndexKey, TKey[]>(writer.Shards[shardIndex], _definition.Comparer);
+            writer.Shards[shardIndex] = new Dictionary<TIndexKey, object>(writer.Shards[shardIndex], _definition.Comparer);
             writer.Owned[shardIndex] = true;
         }
         return writer.Shards[shardIndex];
@@ -119,22 +129,80 @@ internal sealed class IndexState<TKey, TValue, TIndexKey> : IndexState<TKey, TVa
     private void AddToBucket(Writer writer, TIndexKey indexKey, TKey key)
     {
         var shard = GetWritableShard(writer, indexKey);
-        var bucket = shard.TryGetValue(indexKey, out var existing) ? existing : EmptyBucket;
-        var grown = new TKey[bucket.Length + 1];
-        Array.Copy(bucket, grown, bucket.Length);
-        grown[bucket.Length] = key;
-        shard[indexKey] = grown;
+        shard.TryGetValue(indexKey, out var existing);
+        switch (existing)
+        {
+            case ChunkedImmutableList<TKey> chunked:
+            {
+                // Promoted bucket: append copies one chunk + spine, never the whole bucket.
+                var builder = chunked.ToBuilder();
+                builder.Add(key);
+                shard[indexKey] = builder.ToImmutable();
+                break;
+            }
+            case TKey[] bucket when bucket.Length >= ArrayBucketMaxLength:
+            {
+                // Promote: one final full copy into chunks; O(chunk) from here on.
+                var builder = ChunkedImmutableList<TKey>.Empty.ToBuilder();
+                builder.AddRange(bucket.AsSpan());
+                builder.Add(key);
+                shard[indexKey] = builder.ToImmutable();
+                break;
+            }
+            default:
+            {
+                var bucket = existing as TKey[] ?? EmptyBucket;
+                var grown = new TKey[bucket.Length + 1];
+                Array.Copy(bucket, grown, bucket.Length);
+                grown[bucket.Length] = key;
+                shard[indexKey] = grown;
+                break;
+            }
+        }
     }
 
     private void RemoveFromBucket(Writer writer, TIndexKey indexKey, TKey key)
     {
         var shard = GetWritableShard(writer, indexKey);
-        if (!shard.TryGetValue(indexKey, out var bucket))
+        if (!shard.TryGetValue(indexKey, out var existing))
         {
             return;
         }
-        int position = Array.IndexOf(bucket, key);
-        if (position < 0)
+        if (existing is ChunkedImmutableList<TKey> chunked)
+        {
+            // Swap-remove: order within a bucket is unspecified (same contract as the row store).
+            int position = -1, i = 0;
+            var comparer = EqualityComparer<TKey>.Default;
+            foreach (var candidate in chunked)
+            {
+                if (comparer.Equals(candidate, key))
+                {
+                    position = i;
+                    break;
+                }
+                i++;
+            }
+            if (position < 0)
+            {
+                return;
+            }
+            if (chunked.Count == 1)
+            {
+                shard.Remove(indexKey);
+                return;
+            }
+            var builder = chunked.ToBuilder();
+            if (position != chunked.Count - 1)
+            {
+                builder[position] = chunked[chunked.Count - 1];
+            }
+            builder.RemoveLast();
+            shard[indexKey] = builder.ToImmutable();
+            return;
+        }
+        var bucket = (TKey[])existing;
+        int arrayPosition = Array.IndexOf(bucket, key);
+        if (arrayPosition < 0)
         {
             return;
         }
@@ -144,8 +212,8 @@ internal sealed class IndexState<TKey, TValue, TIndexKey> : IndexState<TKey, TVa
             return;
         }
         var shrunk = new TKey[bucket.Length - 1];
-        Array.Copy(bucket, shrunk, position);
-        Array.Copy(bucket, position + 1, shrunk, position, bucket.Length - position - 1);
+        Array.Copy(bucket, shrunk, arrayPosition);
+        Array.Copy(bucket, arrayPosition + 1, shrunk, arrayPosition, bucket.Length - arrayPosition - 1);
         shard[indexKey] = shrunk;
     }
 }

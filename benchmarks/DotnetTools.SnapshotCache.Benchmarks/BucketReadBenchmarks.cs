@@ -40,6 +40,7 @@ public class BucketReadBenchmarks
     private ImmutableArray<Entity>[] _arrays = null!;
     private ChunkedImmutableList<Entity>[] _chunked = null!;
     private SnapshotTable<(long GroupId, long EntityId), Entity>.TableSnapshot _snapshot = null!;
+    private TableIndex<(long GroupId, long EntityId), Entity, long> _byGroup = null!;
     private (int Group, int Index)[] _probes = null!;
     private (long, long)[] _probeKeys = null!;
 
@@ -54,6 +55,7 @@ public class BucketReadBenchmarks
         _chunked = pristine.Select(b => ChunkedImmutableList<Entity>.CreateRange(b)).ToArray();
 
         var table = new SnapshotTable<(long, long), Entity>(capacityHint: N);
+        _byGroup = table.CreateIndex((_, e) => e.GroupId);
         table.Reset(pristine.SelectMany(b => b.Select(e => KeyValuePair.Create((e.GroupId, e.Id), e))));
         _snapshot = table.GetSnapshot();
 
@@ -139,6 +141,23 @@ public class BucketReadBenchmarks
         {
             foreach (var entity in bucket)
             {
+                sum += entity.Kind;
+            }
+        }
+        return sum;
+    }
+
+    [Benchmark(Description = "SnapshotTable group scan via index (1M entities)")]
+    public long SnapshotTable_ScanAllGroupsViaIndex()
+    {
+        // The rekeyed table's group-enumeration path (hybrid index buckets, issue #9):
+        // index key → primary keys → row lookups, all against one consistent snapshot.
+        long sum = 0;
+        for (long g = 0; g < K; g++)
+        {
+            foreach (var key in _snapshot.Lookup(_byGroup, g))
+            {
+                _snapshot.TryGetValue(key, out var entity);
                 sum += entity.Kind;
             }
         }
