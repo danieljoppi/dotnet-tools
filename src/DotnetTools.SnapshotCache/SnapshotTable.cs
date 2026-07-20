@@ -47,6 +47,7 @@ public sealed class SnapshotTable<TKey, TValue> : IReadOnlyCollection<KeyValuePa
     private const int DirBlockMask = DirBlockLength - 1;
 
     private readonly IEqualityComparer<TKey> _comparer;
+    private readonly bool _defaultComparer; // value-type TKey + default comparer → devirtualized hash
     private readonly int _shardCount;
     private readonly int _shardShift; // shard = (hash * Fibonacci) >>> _shardShift
     private readonly int _presizeHint;
@@ -72,6 +73,7 @@ public sealed class SnapshotTable<TKey, TValue> : IReadOnlyCollection<KeyValuePa
         ArgumentNullException.ThrowIfNull(options);
         ArgumentOutOfRangeException.ThrowIfNegative(options.CapacityHint);
         _comparer = options.Comparer ?? EqualityComparer<TKey>.Default;
+        _defaultComparer = typeof(TKey).IsValueType && ReferenceEquals(_comparer, EqualityComparer<TKey>.Default);
         _presizeHint = options.CapacityHint;
         _shardCount = (int)BitOperations.RoundUpToPowerOf2(
             (uint)Math.Clamp(options.CapacityHint / TargetEntriesPerShard, MinShardCount, MaxShardCount));
@@ -104,9 +106,17 @@ public sealed class SnapshotTable<TKey, TValue> : IReadOnlyCollection<KeyValuePa
     /// <summary>Number of rows in the current snapshot.</summary>
     public int Count => Volatile.Read(ref _current).Count;
 
+    // Same devirtualization trick as ShardMap: for value-type keys with the default comparer the
+    // EqualityComparer<TKey>.Default intrinsic inlines the hash, skipping interface dispatch on
+    // the hot path (measurable for composite keys like (long, long)).
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private int ShardOf(TKey key) =>
-        (int)((uint)(_comparer.GetHashCode(key) * -1640531527 /* 0x9E3779B9, Fibonacci hashing */) >> _shardShift);
+    private int ShardOf(TKey key)
+    {
+        int hash = typeof(TKey).IsValueType && _defaultComparer
+            ? EqualityComparer<TKey>.Default.GetHashCode(key)
+            : _comparer.GetHashCode(key);
+        return (int)((uint)(hash * -1640531527 /* 0x9E3779B9, Fibonacci hashing */) >> _shardShift);
+    }
 
     /// <summary>Wait-free point lookup against the current snapshot.</summary>
     public bool TryGetValue(TKey key, out TValue value) =>

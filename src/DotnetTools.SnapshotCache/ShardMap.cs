@@ -24,6 +24,7 @@ internal sealed class ShardMap<TKey>
     private const int MinCapacity = 8;
 
     private readonly IEqualityComparer<TKey> _comparer;
+    private readonly bool _defaultComparer; // value-type TKey + default comparer → devirtualized path
     private TKey[] _keys;
     private int[] _values;
     private byte[] _states;
@@ -33,6 +34,7 @@ internal sealed class ShardMap<TKey>
     internal ShardMap(IEqualityComparer<TKey> comparer, int capacity = MinCapacity)
     {
         _comparer = comparer;
+        _defaultComparer = typeof(TKey).IsValueType && ReferenceEquals(comparer, EqualityComparer<TKey>.Default);
         // Capacity is NOT rounded to a power of two: the start slot comes from a multiply-shift
         // onto [0, capacity) and probing wraps explicitly, so any size works. This matters: with
         // pow2 rounding a shard expecting ~190 entries lands on 512 slots (37% fill); exact sizing
@@ -46,6 +48,7 @@ internal sealed class ShardMap<TKey>
     private ShardMap(ShardMap<TKey> source)
     {
         _comparer = source._comparer;
+        _defaultComparer = source._defaultComparer;
         _keys = (TKey[])source._keys.Clone();
         _values = (int[])source._values.Clone();
         _states = (byte[])source._states.Clone();
@@ -57,13 +60,29 @@ internal sealed class ShardMap<TKey>
 
     public ShardMap<TKey> Clone() => new(this);
 
+    // For value-type keys with the default comparer, calling through EqualityComparer<T>.Default
+    // directly (a JIT intrinsic) devirtualizes and inlines the hash/equality per probe; the
+    // typeof(TKey).IsValueType guard is a JIT-time constant, so reference-type instantiations
+    // keep the plain interface-dispatch path with no extra branch.
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private int HashOf(TKey key) =>
+        typeof(TKey).IsValueType && _defaultComparer
+            ? EqualityComparer<TKey>.Default.GetHashCode(key)
+            : _comparer.GetHashCode(key);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private bool KeyEquals(TKey stored, TKey key) =>
+        typeof(TKey).IsValueType && _defaultComparer
+            ? EqualityComparer<TKey>.Default.Equals(stored, key)
+            : _comparer.Equals(stored, key);
+
     // SnapshotTable routes keys to shards using the HIGH bits of a Fibonacci-mixed hash, so every
     // key in this shard shares those bits. Mix with a different odd constant here and take high
     // bits of that, so probing quality is independent of the shard routing.
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private int StartSlot(TKey key, int capacity)
     {
-        uint mixed = (uint)(_comparer.GetHashCode(key) * -1937831252 /* 0x8C979A2C, distinct odd mix */);
+        uint mixed = (uint)(HashOf(key) * -1937831252 /* 0x8C979A2C, distinct odd mix */);
         return (int)((mixed * (ulong)capacity) >> 32); // high-bits multiply-shift onto [0, capacity)
     }
 
@@ -80,7 +99,7 @@ internal sealed class ShardMap<TKey>
                 value = 0;
                 return false;
             }
-            if (state == Full && _comparer.Equals(_keys[slot], key))
+            if (state == Full && KeyEquals(_keys[slot], key))
             {
                 value = _values[slot];
                 return true;
@@ -125,7 +144,7 @@ internal sealed class ShardMap<TKey>
                     firstTombstone = slot;
                 }
             }
-            else if (_comparer.Equals(_keys[slot], key))
+            else if (KeyEquals(_keys[slot], key))
             {
                 _values[slot] = value;
                 return;
@@ -148,7 +167,7 @@ internal sealed class ShardMap<TKey>
             {
                 return false;
             }
-            if (state == Full && _comparer.Equals(_keys[slot], key))
+            if (state == Full && KeyEquals(_keys[slot], key))
             {
                 _states[slot] = Tombstone;
                 if (RuntimeHelpers.IsReferenceOrContainsReferences<TKey>())

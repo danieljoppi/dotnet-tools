@@ -76,6 +76,50 @@ public class HybridIndexBucketTests
     }
 
     [Fact]
+    public void ManyChangesToOnePromotedBucketInOneBatch_LandAtomicallyThroughOneBuilder()
+    {
+        // A single batch that appends, removes, and moves against the same promoted bucket must
+        // fold through the writer's per-bucket builder (one publish at freeze, not one per change)
+        // and still match a from-scratch scan.
+        var table = new SnapshotTable<long, Entity>(capacityHint: 8 * Promote);
+        var byGroup = table.CreateIndex((_, e) => e.GroupId);
+        table.Reset(Enumerable.Range(0, 3 * Promote).Select(i =>
+            KeyValuePair.Create((long)i, new Entity(i, 7, 0))));
+
+        var upserts = Enumerable.Range(3 * Promote, 500)                       // 500 appends
+            .Select(i => KeyValuePair.Create((long)i, new Entity(i, 7, 1)))
+            .Concat(Enumerable.Range(0, 100)                                   // 100 moves out
+                .Select(i => KeyValuePair.Create((long)i, new Entity(i, 9, 1))))
+            .ToArray();
+        var removes = Enumerable.Range(200, 150).Select(i => (long)i).ToArray(); // 150 removes
+        table.ApplyChanges(upserts, removes);
+
+        var snapshot = table.GetSnapshot();
+        Assert.Equal(3 * Promote + 500 - 100 - 150, snapshot.Lookup(byGroup, 7L).Count);
+        for (long g = 7; g <= 9; g += 2)
+        {
+            Assert.Equal(
+                snapshot.Where(kv => kv.Value.GroupId == g).Select(kv => kv.Key).Order().ToArray(),
+                snapshot.Lookup(byGroup, g).Order().ToArray());
+        }
+    }
+
+    [Fact]
+    public void PromotedBucket_EmptiedInOneBatch_RemovesTheIndexKey()
+    {
+        var table = new SnapshotTable<long, Entity>(capacityHint: 4 * Promote);
+        var byGroup = table.CreateIndex((_, e) => e.GroupId);
+        table.Reset(Enumerable.Range(0, 2 * Promote).Select(i =>
+            KeyValuePair.Create((long)i, new Entity(i, 5, 0))));
+        Assert.Equal(2 * Promote, table.GetSnapshot().Lookup(byGroup, 5L).Count);
+
+        table.ApplyChanges(null, Enumerable.Range(0, 2 * Promote).Select(i => (long)i));
+
+        Assert.Empty(table.GetSnapshot().Lookup(byGroup, 5L));
+        Assert.Equal(0, table.Count);
+    }
+
+    [Fact]
     [Trait("Category", "Performance")]
     public void HotBucketAppends_DoNotTouchTheLargeObjectHeap()
     {

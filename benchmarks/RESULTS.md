@@ -507,6 +507,29 @@ What the sweep shows:
   re-measured this run; `Dictionary` fill remains 13 ms, `FrozenDictionary` 78 ms with a 139 MB
   LOH bill).
 
+## 12. Comparer devirtualization and batched index-bucket builders (#11 first suspect)
+
+Two write/read-path refinements on top of the #7/#9/#10 work, measured with the §9 harness:
+
+- **Hash/equality devirtualization.** `ShardMap`, `SnapshotTable.ShardOf`, and the secondary
+  index call `EqualityComparer<T>.Default` directly when the key is a value type using the
+  default comparer — a JIT intrinsic that inlines the hash and equality per probe instead of
+  interface-dispatching (the `typeof(TKey).IsValueType` guard folds away at JIT time, so
+  reference-type keys keep the old path with no extra branch). This was #11's first suspect for
+  the rekeyed `(sharedKey, entityId)` composite-key workload: `--bucket-loh 10000000 10000 zipf`
+  batch median dropped **219.6 → 118.8 ms** with identical allocation (39.6 MiB) and LOH (0.0)
+  ([before](results/raw/bucket-loh-10m-10k-zipf.txt) →
+  [after](results/raw/bucket-loh-10m-10k-zipf-devirt.txt); the after-run's VM was slower on the
+  unaffected `ChunkedList_Builder` control, so the win is not machine drift). The remaining #11
+  gap vs raw bucket stores — index-writer bookkeeping and chunk scatter — stays open.
+- **One builder per touched promoted bucket per batch.** The index writer folds all of a batch's
+  membership changes to the same promoted (chunked) bucket through a single
+  `ChunkedImmutableList` builder, published once on freeze — previously each change paid its own
+  ToBuilder/publish round-trip (top-spine copy + tail re-expand + trim). With the Zipf hot head
+  seeing 1–50 appends per touched key per batch, this removes O(changes) spine copies per hot
+  group; consistency through mixed add/remove/move batches (including a bucket emptying out
+  mid-batch) is covered by `HybridIndexBucketTests`.
+
 ## Reproducing
 
 ```bash
