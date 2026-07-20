@@ -190,7 +190,7 @@ public class ChunkedImmutableListTests
             int ops = rng.Next(1, 200);
             for (int i = 0; i < ops; i++)
             {
-                switch (rng.Next(3))
+                switch (rng.Next(4))
                 {
                     case 0:
                         int value = rng.Next();
@@ -207,11 +207,72 @@ public class ChunkedImmutableListTests
                         builder.RemoveLast();
                         model.RemoveAt(model.Count - 1);
                         break;
+                    case 3:
+                        var run = new int[rng.Next(0, 300)];
+                        for (int r = 0; r < run.Length; r++)
+                        {
+                            run[r] = rng.Next();
+                        }
+                        builder.AddRange(run);
+                        model.AddRange(run);
+                        break;
                 }
             }
             list = builder.ToImmutable();
             Assert.Equal(model.Count, list.Count);
         }
         Assert.Equal(model, list.ToArray());
+    }
+
+    [Fact]
+    public void Builder_ReusedAcrossManyPublishes_NeverCorruptsEarlierVersions()
+    {
+        // The strongest form of the frozen-snapshot invariant with the right-sized tail: one
+        // builder, many publish cycles, every published version must stay intact to the end.
+        var rng = new Random(777);
+        var builder = ChunkedImmutableList<int>.Empty.ToBuilder();
+        var model = new List<int>();
+        var published = new List<(ChunkedImmutableList<int> List, int[] Expected)>();
+
+        for (int round = 0; round < 40; round++)
+        {
+            int ops = rng.Next(1, 100);
+            for (int i = 0; i < ops; i++)
+            {
+                switch (rng.Next(4))
+                {
+                    case 0:
+                        int value = rng.Next();
+                        builder.Add(value);
+                        model.Add(value);
+                        break;
+                    case 1 when model.Count > 0:
+                        int index = rng.Next(model.Count);
+                        int newValue = rng.Next();
+                        builder[index] = newValue;
+                        model[index] = newValue;
+                        break;
+                    case 2 when model.Count > 0:
+                        builder.RemoveLast();
+                        model.RemoveAt(model.Count - 1);
+                        break;
+                    case 3:
+                        var run = new int[rng.Next(0, 200)];
+                        for (int r = 0; r < run.Length; r++)
+                        {
+                            run[r] = rng.Next();
+                        }
+                        builder.AddRange(run);
+                        model.AddRange(run);
+                        break;
+                }
+            }
+            published.Add((builder.ToImmutable(), model.ToArray()));
+        }
+
+        foreach (var (list, expected) in published)
+        {
+            Assert.Equal(expected, list.ToArray());
+        }
     }
 }

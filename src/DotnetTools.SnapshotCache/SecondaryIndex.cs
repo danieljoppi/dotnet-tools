@@ -53,6 +53,7 @@ internal sealed class IndexState<TKey, TValue, TIndexKey> : IndexState<TKey, TVa
     internal const int ArrayBucketMaxLength = 1024;
 
     private readonly TableIndex<TKey, TValue, TIndexKey> _definition;
+    private readonly bool _defaultComparer; // value-type index key + default comparer → devirtualized path
     // Bucket is TKey[] (small) or ChunkedImmutableList<TKey> (promoted) — both IReadOnlyList<TKey>.
     private readonly Dictionary<TIndexKey, object>[] _shards;
     private readonly int _shardMask;
@@ -60,6 +61,8 @@ internal sealed class IndexState<TKey, TValue, TIndexKey> : IndexState<TKey, TVa
     internal IndexState(TableIndex<TKey, TValue, TIndexKey> definition, int shardCount)
     {
         _definition = definition;
+        _defaultComparer = typeof(TIndexKey).IsValueType
+            && ReferenceEquals(definition.Comparer, EqualityComparer<TIndexKey>.Default);
         _shards = new Dictionary<TIndexKey, object>[shardCount];
         Array.Fill(_shards, EmptyShard);
         _shardMask = shardCount - 1;
@@ -68,6 +71,8 @@ internal sealed class IndexState<TKey, TValue, TIndexKey> : IndexState<TKey, TVa
     private IndexState(TableIndex<TKey, TValue, TIndexKey> definition, Dictionary<TIndexKey, object>[] shards)
     {
         _definition = definition;
+        _defaultComparer = typeof(TIndexKey).IsValueType
+            && ReferenceEquals(definition.Comparer, EqualityComparer<TIndexKey>.Default);
         _shards = shards;
         _shardMask = shards.Length - 1;
     }
@@ -75,8 +80,20 @@ internal sealed class IndexState<TKey, TValue, TIndexKey> : IndexState<TKey, TVa
     private static readonly Dictionary<TIndexKey, object> EmptyShard = [];
     private static readonly TKey[] EmptyBucket = [];
 
+    // Same devirtualization trick as ShardMap: EqualityComparer<T>.Default is a JIT intrinsic
+    // that inlines hash/equality for value-type index keys; reference types keep the plain path.
+    private int HashOf(TIndexKey key) =>
+        typeof(TIndexKey).IsValueType && _defaultComparer
+            ? EqualityComparer<TIndexKey>.Default.GetHashCode(key)
+            : _definition.Comparer.GetHashCode(key);
+
+    private bool IndexKeyEquals(TIndexKey a, TIndexKey b) =>
+        typeof(TIndexKey).IsValueType && _defaultComparer
+            ? EqualityComparer<TIndexKey>.Default.Equals(a, b)
+            : _definition.Comparer.Equals(a, b);
+
     private int ShardOf(TIndexKey key) =>
-        (int)((uint)(_definition.Comparer.GetHashCode(key) * -1640531527) >> 16) & _shardMask;
+        (int)((uint)(HashOf(key) * -1640531527) >> 16) & _shardMask;
 
     internal IReadOnlyList<TKey> Lookup(TIndexKey indexKey) =>
         _shards[ShardOf(indexKey)].TryGetValue(indexKey, out var bucket)
@@ -87,20 +104,43 @@ internal sealed class IndexState<TKey, TValue, TIndexKey> : IndexState<TKey, TVa
     {
         internal required Dictionary<TIndexKey, object>[] Shards;
         internal required bool[] Owned;
+
+        // Promoted buckets touched by this batch, mutated through one builder each so N membership
+        // changes to the same hot group cost one spine copy, not N publishes. Folded back into the
+        // shards on Freeze. (The Zipf hot head sees 1–50 appends per touched key per batch.)
+        internal Dictionary<TIndexKey, ChunkedImmutableList<TKey>.Builder>? Building;
     }
 
     internal override object CreateWriter() =>
         new Writer { Shards = (Dictionary<TIndexKey, object>[])_shards.Clone(), Owned = new bool[_shards.Length] };
 
-    internal override IndexState<TKey, TValue> Freeze(object writerState) =>
-        new IndexState<TKey, TValue, TIndexKey>(_definition, ((Writer)writerState).Shards);
+    internal override IndexState<TKey, TValue> Freeze(object writerState)
+    {
+        var writer = (Writer)writerState;
+        if (writer.Building is { } building)
+        {
+            foreach (var (indexKey, builder) in building)
+            {
+                var shard = GetWritableShard(writer, indexKey);
+                if (builder.Count == 0)
+                {
+                    shard.Remove(indexKey);
+                }
+                else
+                {
+                    shard[indexKey] = builder.ToImmutable();
+                }
+            }
+        }
+        return new IndexState<TKey, TValue, TIndexKey>(_definition, writer.Shards);
+    }
 
     internal override void Apply(
         object writerState, TKey key, bool hadOld, TValue? oldValue, bool hasNew, TValue? newValue)
     {
         TIndexKey? oldIndexKey = hadOld ? _definition.Selector(key, oldValue!) : default;
         TIndexKey? newIndexKey = hasNew ? _definition.Selector(key, newValue!) : default;
-        if (hadOld && hasNew && _definition.Comparer.Equals(oldIndexKey!, newIndexKey!))
+        if (hadOld && hasNew && IndexKeyEquals(oldIndexKey!, newIndexKey!))
         {
             return; // value changed but its index key didn't — no bucket movement
         }
@@ -126,8 +166,22 @@ internal sealed class IndexState<TKey, TValue, TIndexKey> : IndexState<TKey, TVa
         return writer.Shards[shardIndex];
     }
 
+    /// <summary>Registers <paramref name="builder"/> as this batch's pending state for the bucket;
+    /// the stale shard entry is replaced when the batch freezes.</summary>
+    private ChunkedImmutableList<TKey>.Builder OpenBuilder(
+        Writer writer, TIndexKey indexKey, ChunkedImmutableList<TKey>.Builder builder)
+    {
+        (writer.Building ??= new Dictionary<TIndexKey, ChunkedImmutableList<TKey>.Builder>(_definition.Comparer))[indexKey] = builder;
+        return builder;
+    }
+
     private void AddToBucket(Writer writer, TIndexKey indexKey, TKey key)
     {
+        if (writer.Building is { } building && building.TryGetValue(indexKey, out var pending))
+        {
+            pending.Add(key); // bucket already open this batch: O(chunk), no publish until Freeze
+            return;
+        }
         var shard = GetWritableShard(writer, indexKey);
         shard.TryGetValue(indexKey, out var existing);
         switch (existing)
@@ -135,18 +189,15 @@ internal sealed class IndexState<TKey, TValue, TIndexKey> : IndexState<TKey, TVa
             case ChunkedImmutableList<TKey> chunked:
             {
                 // Promoted bucket: append copies one chunk + spine, never the whole bucket.
-                var builder = chunked.ToBuilder();
-                builder.Add(key);
-                shard[indexKey] = builder.ToImmutable();
+                OpenBuilder(writer, indexKey, chunked.ToBuilder()).Add(key);
                 break;
             }
             case TKey[] bucket when bucket.Length >= ArrayBucketMaxLength:
             {
                 // Promote: one final full copy into chunks; O(chunk) from here on.
-                var builder = ChunkedImmutableList<TKey>.Empty.ToBuilder();
+                var builder = OpenBuilder(writer, indexKey, ChunkedImmutableList<TKey>.Empty.ToBuilder());
                 builder.AddRange(bucket.AsSpan());
                 builder.Add(key);
-                shard[indexKey] = builder.ToImmutable();
                 break;
             }
             default:
@@ -163,6 +214,11 @@ internal sealed class IndexState<TKey, TValue, TIndexKey> : IndexState<TKey, TVa
 
     private void RemoveFromBucket(Writer writer, TIndexKey indexKey, TKey key)
     {
+        if (writer.Building is { } building && building.TryGetValue(indexKey, out var pending))
+        {
+            RemoveFromBuilder(pending, key);
+            return;
+        }
         var shard = GetWritableShard(writer, indexKey);
         if (!shard.TryGetValue(indexKey, out var existing))
         {
@@ -171,33 +227,9 @@ internal sealed class IndexState<TKey, TValue, TIndexKey> : IndexState<TKey, TVa
         if (existing is ChunkedImmutableList<TKey> chunked)
         {
             // Swap-remove: order within a bucket is unspecified (same contract as the row store).
-            int position = -1, i = 0;
-            var comparer = EqualityComparer<TKey>.Default;
-            foreach (var candidate in chunked)
-            {
-                if (comparer.Equals(candidate, key))
-                {
-                    position = i;
-                    break;
-                }
-                i++;
-            }
-            if (position < 0)
-            {
-                return;
-            }
-            if (chunked.Count == 1)
-            {
-                shard.Remove(indexKey);
-                return;
-            }
-            var builder = chunked.ToBuilder();
-            if (position != chunked.Count - 1)
-            {
-                builder[position] = chunked[chunked.Count - 1];
-            }
-            builder.RemoveLast();
-            shard[indexKey] = builder.ToImmutable();
+            // The builder is kept open for the rest of the batch; Freeze removes the key if it
+            // empties out.
+            RemoveFromBuilder(OpenBuilder(writer, indexKey, chunked.ToBuilder()), key);
             return;
         }
         var bucket = (TKey[])existing;
@@ -215,5 +247,25 @@ internal sealed class IndexState<TKey, TValue, TIndexKey> : IndexState<TKey, TVa
         Array.Copy(bucket, shrunk, arrayPosition);
         Array.Copy(bucket, arrayPosition + 1, shrunk, arrayPosition, bucket.Length - arrayPosition - 1);
         shard[indexKey] = shrunk;
+    }
+
+    /// <summary>Swap-remove within a batch's open bucket builder: O(scan) to find the key,
+    /// O(chunk) to relocate the last element.</summary>
+    private static void RemoveFromBuilder(ChunkedImmutableList<TKey>.Builder builder, TKey key)
+    {
+        int count = builder.Count;
+        for (int i = 0; i < count; i++)
+        {
+            if (EqualityComparer<TKey>.Default.Equals(builder[i], key))
+            {
+                int last = count - 1;
+                if (i != last)
+                {
+                    builder[i] = builder[last];
+                }
+                builder.RemoveLast();
+                return;
+            }
+        }
     }
 }
