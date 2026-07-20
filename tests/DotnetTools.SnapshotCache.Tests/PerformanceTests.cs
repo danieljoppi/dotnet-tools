@@ -64,10 +64,12 @@ public class PerformanceTests
         long allocated = GC.GetAllocatedBytesForCurrentThread() - before;
 
         // A full copy of 1M KeyValuePair<long,long> rows alone is ~16 MB, plus a rebuilt 1M-entry
-        // index would be ~28 MB more. Copy-on-write of ~5k touched chunks/shards must stay far
-        // below that; 20 MB is a very loose ceiling that still proves O(batch) behaviour.
-        Assert.True(allocated < 20_000_000,
-            $"5k-row batch on a 1M-row table allocated {allocated / 1_000_000.0:F1} MB; expected O(batch), < 20 MB.");
+        // index would be ~28 MB more. Copy-on-write of a uniformly random 5k batch over ~245 chunks
+        // touches nearly every chunk and measures ~15.3 MB. Gate as a *band* around that baseline:
+        // the upper bound catches a regression toward O(N); the lower bound catches an accidental
+        // under-copy (a correctness bug that skips touched chunks would allocate far less). Both
+        // bounds are deterministic — allocation, unlike wall time, does not drift on CI runners.
+        Assert.InRange(allocated, 8_000_000, 18_000_000);
     }
 
     [Fact]
@@ -153,6 +155,70 @@ public class PerformanceTests
             }
             GC.KeepAlive(next);
         }
+    }
+
+    // --- Reference-type rows: the guardrails above use long → long, but real caches hold reference
+    // payloads the GC must trace, which is a different allocation and LOH profile. These repeat the
+    // two load-bearing shape checks on a mid-width record row. ---
+
+    private sealed record Row(long Id, string Name, decimal Balance, DateTime UpdatedAt);
+
+    private static SnapshotTable<long, Row> BuildReferenceTable()
+    {
+        var table = new SnapshotTable<long, Row>(capacityHint: TableSize);
+        table.Reset(Enumerable.Range(0, TableSize)
+            .Select(i => KeyValuePair.Create((long)i, new Row(i, "row", i * 1.5m, DateTime.UnixEpoch))));
+        return table;
+    }
+
+    [Fact]
+    public void Reads_ReferenceRows_AreAllocationFree()
+    {
+        var table = BuildReferenceTable();
+        var snapshot = table.GetSnapshot();
+        table.TryGetValue(1, out _); // warm-up
+        snapshot.TryGetValue(1, out _);
+
+        long before = GC.GetAllocatedBytesForCurrentThread();
+        for (long k = 0; k < 100_000; k++)
+        {
+            table.TryGetValue(k % TableSize, out _);
+            snapshot.TryGetValue((k * 31) % TableSize, out _);
+        }
+        long allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+
+        Assert.True(allocated == 0, $"200k reference-row lookups allocated {allocated} bytes; expected 0.");
+    }
+
+    [Fact]
+    public void BatchUpdate_ReferenceRows_DoNotAllocateOnLargeObjectHeap()
+    {
+        var table = BuildReferenceTable();
+        var rng = new Random(42);
+        var batch = Enumerable.Range(0, BatchSize)
+            .Select(_ => (long)rng.Next(TableSize)).Distinct()
+            .Select(k => KeyValuePair.Create(k, new Row(k, "changed", -k, DateTime.UnixEpoch)))
+            .ToArray();
+        table.ApplyChanges(batch); // warm-up
+
+        long lohBefore = ForcedLohBytes();
+        for (int i = 0; i < 10; i++)
+        {
+            table.ApplyChanges(batch);
+        }
+        long lohGrowth = ForcedLohBytes() - lohBefore;
+
+        Assert.True(lohGrowth < 1_000_000,
+            $"10 reference-row batches grew LOH by {lohGrowth} bytes; expected none.");
+    }
+
+    // Forced compacting-free full collection, then LOH segment size — the same monotonic proxy the
+    // long→long guardrail uses. Reliable only when tests are serialized (see TestParallelization.cs).
+    private static long ForcedLohBytes()
+    {
+        GC.Collect(2, GCCollectionMode.Forced, blocking: true, compacting: false);
+        var info = GC.GetGCMemoryInfo(GCKind.FullBlocking);
+        return info.GenerationInfo.Length > 3 ? info.GenerationInfo[3].SizeAfterBytes : 0;
     }
 
     [Fact]

@@ -4,6 +4,16 @@ on:
   pull_request:
   push:
     branches: [main]
+  workflow_dispatch:
+    inputs:
+      filter:
+        description: "BenchmarkDotNet --filter glob(s) for the manual full run"
+        default: "*"
+      job:
+        description: "BenchmarkDotNet job (short = fast/indicative, default = publication-grade)"
+        default: "short"
+        type: choice
+        options: [short, default]
 
 jobs:
   unit-tests:
@@ -81,10 +91,13 @@ jobs:
           dotnet-version: 10.0.x
       # ShortRun gives indicative numbers in ~15 minutes. CI runners are noisy: treat these as a
       # regression smoke signal, and run the full suite locally before trusting small deltas.
-      - name: Run batch-update benchmarks (ShortRun)
+      # Deterministic allocation regressions are gated in the perf-tests job (xUnit guardrails);
+      # these benchmarks report timing + allocation without asserting. BucketRead is included
+      # because it is read-only and fast, giving the shared-key surface a smoke signal too.
+      - name: Run benchmarks (ShortRun)
         run: >
           dotnet run -c Release --project benchmarks/DotnetTools.SnapshotCache.Benchmarks
-          -- --filter '*BatchUpdate*' --job short --memory
+          -- --filter '*BatchUpdate*' '*BucketRead*' --job short --memory
       - name: Publish results to job summary
         if: always()
         run: |
@@ -96,4 +109,43 @@ jobs:
         if: always()
         with:
           name: benchmark-results
+          path: BenchmarkDotNet.Artifacts/results/
+
+  benchmark-full:
+    name: Benchmarks (manual full run)
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      # Operator-triggered: run any subset (default: everything). Use job=default for
+      # publication-grade statistics; the bucket-workload LOH studies (which BenchmarkDotNet
+      # cannot report) run as console harnesses below and are attached to the summary too.
+      - name: Run benchmarks
+        run: >
+          dotnet run -c Release --project benchmarks/DotnetTools.SnapshotCache.Benchmarks
+          -- --filter '${{ inputs.filter }}' --job '${{ inputs.job }}' --memory
+      - name: Run bucket LOH studies (console harness)
+        run: |
+          proj=benchmarks/DotnetTools.SnapshotCache.Benchmarks
+          {
+            echo '## Bucket LOH studies'
+            echo '```'
+            dotnet run -c Release --project "$proj" -- --bucket-loh 1000000 10000 zipf 10
+            dotnet run -c Release --project "$proj" -- --bucket-loh 1000000 100000 uniform 10
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Publish benchmark results to job summary
+        if: always()
+        run: |
+          for f in BenchmarkDotNet.Artifacts/results/*-report-github.md; do
+            [ -e "$f" ] || continue
+            cat "$f" >> "$GITHUB_STEP_SUMMARY"
+          done
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: benchmark-results-full
           path: BenchmarkDotNet.Artifacts/results/
