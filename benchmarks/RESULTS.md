@@ -389,10 +389,11 @@ approaches win everything): [`bucket-loh-1m-10k-zipf.txt`](results/raw/bucket-lo
   and clustered replaces are where structural sharing shines.
 - **`SnapshotTable_Rekeyed` buys atomicity, not speed.** One `ApplyChanges` gives a consistent
   cross-key snapshot and point reads by `(groupId, entityId)`, at 3–10× the batch cost of the
-  chunked buckets and the highest snapshot-retention cost (index shards + directory clones). Note
-  it answers "get *one* entity" — enumerating *all* entities of a group needs a secondary index,
-  and the current secondary index copies its bucket per change (documented for buckets up to the
-  low thousands), so it is **not** suitable for 10k+ entity groups. See API gaps below.
+  chunked buckets and the highest snapshot-retention cost (index shards + directory clones).
+  Enumerating *all* entities of a group needs a secondary index; since issue #9 the index's
+  buckets are hybrid (flat arrays ≤1,024 elements, chunked beyond), so hot 10k–100k+ entity
+  groups index-append at O(chunk) with zero LOH and group enumeration is supported at any bucket
+  size — at the read cost measured in the table above.
 
 ### The read side — what the LOH win costs per lookup and per scan
 
@@ -402,17 +403,22 @@ restore → stable timings, zero allocation on every row):
 
 | Access pattern (1M entities, K=10k) | ImmutableArray | ChunkedImmutableList | SnapshotTable_Rekeyed |
 |---|---:|---:|---:|
-| 10k random indexed reads, hot-weighted (Zipf) | **153 μs (~15 ns)** | 375 μs (~38 ns, 2.5×) | 1,734 μs (~173 ns)³ |
-| 10k random indexed reads (Uniform) | **192 μs (~19 ns)** | 382 μs (~38 ns, 2.0×) | 1,788 μs (~179 ns)³ |
-| Scan all 1M entities (Zipf) | **4.5 ms (~4.5 ns/entity)** | 6.2 ms (~6.2 ns, 1.4×) | n/a — needs group index (#9) |
-| Scan all 1M entities (Uniform) | **5.1 ms (~5.1 ns/entity)** | 5.4 ms (~5.4 ns, 1.06×) | n/a |
+| 10k random indexed reads, hot-weighted (Zipf) | **136 μs (~14 ns)** | 310 μs (~31 ns, 2.3×) | 1,791 μs (~179 ns)³ |
+| 10k random indexed reads (Uniform) | **183 μs (~18 ns)** | 385 μs (~38 ns, 2.1×) | 1,884 μs (~188 ns)³ |
+| Scan all 1M entities (Zipf) | **4.5 ms (~4.5 ns/entity)** | 4.7 ms (~4.7 ns, 1.05×) | 137 ms via group index⁴ |
+| Scan all 1M entities (Uniform) | **4.5 ms (~4.5 ns/entity)** | 5.6 ms (~5.6 ns, 1.25×) | 149 ms via group index⁴ |
 
 ³ Table-lookup timings carried a wide error band in this run (±2 ms); §2's steadier measurement
 puts the per-lookup cost at ~60–120 ns. The 4–10× ratio band vs a contiguous array is the signal.
 
+⁴ Group enumeration through the hybrid secondary index (issue #9): index key → primary keys →
+row lookups against one consistent snapshot. It is point-lookup-bound (~140 ns/entity), ~30×
+a direct chunked-bucket scan, allocating only ~320 KB of enumerators for all 10k groups — the
+price of full atomicity when the entities live in one re-keyed table rather than per-key buckets.
+
 Raw: [`BucketReadBenchmarks-report-github.md`](results/raw/DotnetTools.SnapshotCache.Benchmarks.BucketReadBenchmarks-report-github.md).
-(Re-measured after issue #7; ratios were identical before it — the compact representation does
-not touch the read path.)
+(Re-measured after issues #7/#9; the array/chunked ratios were identical before — the compact
+representation does not touch the read path.)
 
 How to read it: the chunked list's three-array-hop indexer costs ~2–2.5× a contiguous array on
 random access, and sequential scans — the aggregation/report path — pay 1.06–1.5× because the
@@ -439,11 +445,13 @@ chunked read premium only where the alternative is LOH churn.
 2. ~~**`ChunkedImmutableList` fixed per-instance overhead**~~ — **fixed** (issue #7, in this
    core): trimmed tail chunks + grow-by-doubling spine blocks cut the K=100k build heap from
    1.30 GiB to 137.3 MiB with the read path untouched.
-3. **`Builder` has no `AddRange`** — bulk appends go through per-item `Add`.
-4. **Secondary-index buckets are flat copied arrays** — fine for the documented
-   moderate-cardinality use, unusable as a group index for 10k+ entity buckets (each entity
-   add/remove would copy a LOH-sized key array). A chunked bucket representation would make
-   `SnapshotTable` + group index a complete answer for this workload.
+3. ~~**`Builder` has no `AddRange`**~~ — **fixed** (issue #10, in this core): span/enumerable
+   overloads copy chunk-sized runs; `EmptyWithTargetBytes` is public for bytes-based chunk tuning.
+4. ~~**Secondary-index buckets are flat copied arrays**~~ — **fixed** (issue #9, in this core):
+   buckets stay flat arrays up to 1,024 elements (best reads, cheap copies) and promote to
+   `ChunkedImmutableList` beyond, so hot 10k–100k+ entity groups append at O(chunk) with zero
+   LOH (guardrail test `HotBucketAppends_DoNotTouchTheLargeObjectHeap`). `SnapshotTable` + group
+   index is now a complete answer for one-to-many enumeration — measured in the read table above.
 
 ## 10. Single large refresh over skewed buckets (Workload C)
 

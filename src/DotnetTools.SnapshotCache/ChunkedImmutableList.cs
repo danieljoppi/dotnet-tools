@@ -68,10 +68,17 @@ public sealed class ChunkedImmutableList<T> : IReadOnlyList<T>
 
     public static readonly ChunkedImmutableList<T> Empty = new([], 0, DefaultShift);
 
-    /// <summary>An empty list whose chunks target <paramref name="targetChunkBytes"/> of payload
-    /// (clamped to the LOH-safe maximum).</summary>
-    internal static ChunkedImmutableList<T> EmptyWithTargetBytes(int targetChunkBytes)
+    /// <summary>
+    /// An empty list whose chunks target <paramref name="targetChunkBytes"/> of payload, computed
+    /// from <typeparamref name="T"/>'s size and clamped to the LOH-safe maximum. Prefer this over
+    /// <see cref="EmptyWithChunkRows"/> when tuning copy-on-write granularity — smaller chunks make
+    /// sparse random batches cheaper to copy, larger chunks favor dense updates and scans — since
+    /// it spares callers the element-size arithmetic. Lists and builders derived from the result
+    /// keep the chunk size.
+    /// </summary>
+    public static ChunkedImmutableList<T> EmptyWithTargetBytes(int targetChunkBytes)
     {
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(targetChunkBytes);
         int shift = ShiftForTargetBytes(targetChunkBytes);
         return shift == DefaultShift ? Empty : new ChunkedImmutableList<T>([], 0, shift);
     }
@@ -131,15 +138,13 @@ public sealed class ChunkedImmutableList<T> : IReadOnlyList<T>
     private static void ThrowIndexOutOfRange(int index) =>
         throw new ArgumentOutOfRangeException(nameof(index), index, "Index is out of range.");
 
-    /// <summary>Builds a list from a sequence. Allocates only chunk/spine-block sized arrays.</summary>
+    /// <summary>Builds a list from a sequence. Allocates only chunk/spine-block sized arrays;
+    /// arrays and lists are copied chunk-by-chunk via <see cref="Builder.AddRange(ReadOnlySpan{T})"/>.</summary>
     public static ChunkedImmutableList<T> CreateRange(IEnumerable<T> items)
     {
         ArgumentNullException.ThrowIfNull(items);
         var builder = Empty.ToBuilder();
-        foreach (var item in items)
-        {
-            builder.Add(item);
-        }
+        builder.AddRange(items);
         return builder.ToImmutable();
     }
 
@@ -293,6 +298,48 @@ public sealed class ChunkedImmutableList<T> : IReadOnlyList<T>
             }
             GetWritableChunk(chunkIndex)[_count & _mask] = value;
             _count++;
+        }
+
+        /// <summary>Appends a run of elements, copying chunk-sized spans instead of paying the
+        /// per-element chunk resolution of <see cref="Add"/>.</summary>
+        public void AddRange(ReadOnlySpan<T> items)
+        {
+            int offset = 0;
+            while (offset < items.Length)
+            {
+                int chunkIndex = _count >> _shift;
+                if (chunkIndex == _chunkCount)
+                {
+                    AppendChunk();
+                }
+                var chunk = GetWritableChunk(chunkIndex);
+                int slot = _count & _mask;
+                int copy = Math.Min(items.Length - offset, chunk.Length - slot);
+                items.Slice(offset, copy).CopyTo(chunk.AsSpan(slot));
+                _count += copy;
+                offset += copy;
+            }
+        }
+
+        /// <summary>Appends a sequence; arrays and lists take the bulk span path.</summary>
+        public void AddRange(IEnumerable<T> items)
+        {
+            ArgumentNullException.ThrowIfNull(items);
+            switch (items)
+            {
+                case T[] array:
+                    AddRange(array.AsSpan());
+                    break;
+                case List<T> list:
+                    AddRange(System.Runtime.InteropServices.CollectionsMarshal.AsSpan(list));
+                    break;
+                default:
+                    foreach (var item in items)
+                    {
+                        Add(item);
+                    }
+                    break;
+            }
         }
 
         /// <summary>Removes the last element. Combined with a swap of the last element into the
