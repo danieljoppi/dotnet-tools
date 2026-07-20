@@ -1,7 +1,7 @@
 ```
 
 BenchmarkDotNet v0.15.8, Linux Ubuntu 24.04.4 LTS (Noble Numbat)
-Intel Xeon Processor 2.10GHz, 1 CPU, 4 logical and 4 physical cores
+Intel Xeon Processor 2.80GHz, 1 CPU, 4 logical and 4 physical cores
 .NET SDK 10.0.110
   [Host]   : .NET 10.0.10 (10.0.10, 10.0.1026.32716), X64 RyuJIT x86-64-v4
   ShortRun : .NET 10.0.10 (10.0.10, 10.0.1026.32716), X64 RyuJIT x86-64-v4
@@ -10,22 +10,26 @@ Job=ShortRun  IterationCount=3  LaunchCount=1
 WarmupCount=3  
 
 ```
-| Method                                             | N       | K     | Skew    | Mean         | Error        | StdDev      | Ratio  | RatioSD | Allocated | Alloc Ratio |
-|--------------------------------------------------- |-------- |------ |-------- |-------------:|-------------:|------------:|-------:|--------:|----------:|------------:|
-| **&#39;ImmArray[i] x10k (hot-weighted)&#39;**                  | **1000000** | **10000** | **Uniform** |     **213.3 μs** |     **310.2 μs** |    **17.00 μs** |   **1.00** |    **0.10** |         **-** |          **NA** |
-| &#39;ChunkedList[i] x10k (hot-weighted)&#39;               | 1000000 | 10000 | Uniform |     399.4 μs |     210.2 μs |    11.52 μs |   1.88 |    0.14 |         - |          NA |
-| &#39;SnapshotTable_Rekeyed lookup x10k&#39;                | 1000000 | 10000 | Uniform |   1,728.3 μs |   1,111.4 μs |    60.92 μs |   8.14 |    0.64 |         - |          NA |
-| &#39;ImmArray scan all buckets (1M entities)&#39;          | 1000000 | 10000 | Uniform |   4,036.9 μs |     684.2 μs |    37.50 μs |  19.01 |    1.38 |         - |          NA |
-| &#39;ChunkedList scan all buckets (1M entities)&#39;       | 1000000 | 10000 | Uniform |   4,642.9 μs |     360.1 μs |    19.74 μs |  21.86 |    1.58 |         - |          NA |
-| &#39;MultiValueTable bucket[i] x10k (hot-weighted)&#39;    | 1000000 | 10000 | Uniform |     596.8 μs |     173.0 μs |     9.48 μs |   2.81 |    0.21 |         - |          NA |
-| &#39;MultiValueTable scan all buckets (1M entities)&#39;   | 1000000 | 10000 | Uniform |   5,159.3 μs |     455.8 μs |    24.98 μs |  24.30 |    1.76 |         - |          NA |
-| &#39;SnapshotTable group scan via index (1M entities)&#39; | 1000000 | 10000 | Uniform | 140,825.2 μs | 158,350.5 μs | 8,679.73 μs | 663.16 |   59.63 |  320006 B |          NA |
-|                                                    |         |       |         |              |              |             |        |         |           |             |
-| **&#39;ImmArray[i] x10k (hot-weighted)&#39;**                  | **1000000** | **10000** | **Zipf**    |     **181.7 μs** |     **267.6 μs** |    **14.67 μs** |   **1.00** |    **0.10** |         **-** |          **NA** |
-| &#39;ChunkedList[i] x10k (hot-weighted)&#39;               | 1000000 | 10000 | Zipf    |     303.6 μs |     433.6 μs |    23.77 μs |   1.68 |    0.17 |         - |          NA |
-| &#39;SnapshotTable_Rekeyed lookup x10k&#39;                | 1000000 | 10000 | Zipf    |   1,619.1 μs |   2,607.3 μs |   142.91 μs |   8.95 |    0.95 |         - |          NA |
-| &#39;ImmArray scan all buckets (1M entities)&#39;          | 1000000 | 10000 | Zipf    |   4,863.0 μs |   1,593.9 μs |    87.37 μs |  26.88 |    2.00 |         - |          NA |
-| &#39;ChunkedList scan all buckets (1M entities)&#39;       | 1000000 | 10000 | Zipf    |   4,888.6 μs |     284.9 μs |    15.61 μs |  27.02 |    1.97 |         - |          NA |
-| &#39;MultiValueTable bucket[i] x10k (hot-weighted)&#39;    | 1000000 | 10000 | Zipf    |     699.9 μs |     544.0 μs |    29.82 μs |   3.87 |    0.32 |         - |          NA |
-| &#39;MultiValueTable scan all buckets (1M entities)&#39;   | 1000000 | 10000 | Zipf    |   9,527.7 μs |   4,680.9 μs |   256.57 μs |  52.66 |    4.03 |         - |          NA |
-| &#39;SnapshotTable group scan via index (1M entities)&#39; | 1000000 | 10000 | Zipf    | 149,158.1 μs |  84,635.3 μs | 4,639.15 μs | 824.45 |   64.08 |  321590 B |          NA |
+| Method                                             | N       | K     | Skew    | Mean         | Error         | StdDev       | Ratio  | RatioSD | Allocated | Alloc Ratio |
+|--------------------------------------------------- |-------- |------ |-------- |-------------:|--------------:|-------------:|-------:|--------:|----------:|------------:|
+| **&#39;ImmArray[i] x10k (hot-weighted)&#39;**                  | **1000000** | **10000** | **Uniform** |     **265.1 μs** |     **146.87 μs** |      **8.05 μs** |   **1.00** |    **0.04** |         **-** |          **NA** |
+| &#39;ChunkedList[i] x10k (hot-weighted)&#39;               | 1000000 | 10000 | Uniform |     334.3 μs |     139.48 μs |      7.65 μs |   1.26 |    0.04 |         - |          NA |
+| &#39;ImmList[i] x10k (hot-weighted)&#39;                   | 1000000 | 10000 | Uniform |   1,239.3 μs |      40.45 μs |      2.22 μs |   4.68 |    0.12 |         - |          NA |
+| &#39;SnapshotTable_Rekeyed lookup x10k&#39;                | 1000000 | 10000 | Uniform |   1,267.2 μs |   1,232.07 μs |     67.53 μs |   4.78 |    0.25 |         - |          NA |
+| &#39;ImmArray scan all buckets (1M entities)&#39;          | 1000000 | 10000 | Uniform |   9,977.6 μs |   9,391.07 μs |    514.76 μs |  37.67 |    1.94 |         - |          NA |
+| &#39;ChunkedList scan all buckets (1M entities)&#39;       | 1000000 | 10000 | Uniform |  10,092.3 μs |   3,397.31 μs |    186.22 μs |  38.10 |    1.16 |         - |          NA |
+| &#39;ImmList scan all buckets (1M entities)&#39;           | 1000000 | 10000 | Uniform |  30,214.2 μs |   6,689.16 μs |    366.66 μs | 114.06 |    3.18 |         - |          NA |
+| &#39;MultiValueTable bucket[i] x10k (hot-weighted)&#39;    | 1000000 | 10000 | Uniform |     438.4 μs |     232.55 μs |     12.75 μs |   1.65 |    0.06 |         - |          NA |
+| &#39;MultiValueTable scan all buckets (1M entities)&#39;   | 1000000 | 10000 | Uniform |  11,619.0 μs |  20,881.03 μs |  1,144.56 μs |  43.86 |    3.91 |         - |          NA |
+| &#39;SnapshotTable group scan via index (1M entities)&#39; | 1000000 | 10000 | Uniform | 175,978.1 μs | 345,267.88 μs | 18,925.30 μs | 664.32 |   64.23 |  320000 B |          NA |
+|                                                    |         |       |         |              |               |              |        |         |           |             |
+| **&#39;ImmArray[i] x10k (hot-weighted)&#39;**                  | **1000000** | **10000** | **Zipf**    |     **235.3 μs** |      **76.10 μs** |      **4.17 μs** |   **1.00** |    **0.02** |         **-** |          **NA** |
+| &#39;ChunkedList[i] x10k (hot-weighted)&#39;               | 1000000 | 10000 | Zipf    |     290.9 μs |      80.17 μs |      4.39 μs |   1.24 |    0.02 |         - |          NA |
+| &#39;ImmList[i] x10k (hot-weighted)&#39;                   | 1000000 | 10000 | Zipf    |   2,562.2 μs |   1,398.47 μs |     76.65 μs |  10.89 |    0.33 |         - |          NA |
+| &#39;SnapshotTable_Rekeyed lookup x10k&#39;                | 1000000 | 10000 | Zipf    |   1,211.0 μs |     602.56 μs |     33.03 μs |   5.15 |    0.14 |         - |          NA |
+| &#39;ImmArray scan all buckets (1M entities)&#39;          | 1000000 | 10000 | Zipf    |  10,027.9 μs |   3,879.18 μs |    212.63 μs |  42.62 |    1.02 |         - |          NA |
+| &#39;ChunkedList scan all buckets (1M entities)&#39;       | 1000000 | 10000 | Zipf    |  10,031.6 μs |   7,438.69 μs |    407.74 μs |  42.64 |    1.64 |         - |          NA |
+| &#39;ImmList scan all buckets (1M entities)&#39;           | 1000000 | 10000 | Zipf    |  31,725.2 μs |  16,266.13 μs |    891.60 μs | 134.84 |    3.87 |         - |          NA |
+| &#39;MultiValueTable bucket[i] x10k (hot-weighted)&#39;    | 1000000 | 10000 | Zipf    |     545.2 μs |      51.96 μs |      2.85 μs |   2.32 |    0.04 |         - |          NA |
+| &#39;MultiValueTable scan all buckets (1M entities)&#39;   | 1000000 | 10000 | Zipf    |  15,957.5 μs |   6,749.46 μs |    369.96 μs |  67.82 |    1.71 |         - |          NA |
+| &#39;SnapshotTable group scan via index (1M entities)&#39; | 1000000 | 10000 | Zipf    | 169,521.5 μs | 109,153.96 μs |  5,983.10 μs | 720.51 |   24.62 |  321584 B |          NA |
