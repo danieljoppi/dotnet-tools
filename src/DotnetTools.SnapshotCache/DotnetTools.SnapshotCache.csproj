@@ -19,6 +19,7 @@
     <RepositoryType>git</RepositoryType>
     <PackageTags>cache;snapshot;immutable;loh;gc;performance;in-memory;table</PackageTags>
     <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageReleaseNotes>See CHANGELOG.md: https://github.com/danieljoppi/dotnet-tools/blob/main/CHANGELOG.md</PackageReleaseNotes>
     <IncludeSymbols>true</IncludeSymbols>
     <SymbolPackageFormat>snupkg</SymbolPackageFormat>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
