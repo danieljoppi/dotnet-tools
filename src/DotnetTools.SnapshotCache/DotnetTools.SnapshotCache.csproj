@@ -1,10 +1,14 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFramework>net10.0</TargetFramework>
+    <!-- net8.0 is the LTS floor: the library uses nothing newer (verified by the CI test matrix),
+         and large in-memory caches overwhelmingly run on LTS services. -->
+    <TargetFrameworks>net8.0;net10.0</TargetFrameworks>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <LangVersion>latest</LangVersion>
+    <!-- Reflection-free by design; declare it so trimmed and NativeAOT apps get no warnings. -->
+    <IsAotCompatible>true</IsAotCompatible>
     <Description>Low-allocation, LOH-free snapshot collections for large in-memory table caches: wait-free reads, atomic batch refreshes with copy-on-write cost proportional to the batch, secondary indexes, and change notifications. Validated at 100M rows with zero Large Object Heap usage.</Description>
     <PackageId>DotnetTools.SnapshotCache</PackageId>
     <Version>0.2.0</Version>

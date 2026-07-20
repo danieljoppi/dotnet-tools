@@ -20,7 +20,7 @@ the Large Object Heap (arrays ≥ 85,000 bytes), at any table size.** Design rat
 ## Layout
 
 ```
-src/DotnetTools.SnapshotCache/            the library (net10.0, zero dependencies)
+src/DotnetTools.SnapshotCache/            the library (net8.0;net10.0, zero dependencies)
 tests/DotnetTools.SnapshotCache.Tests/    xUnit: correctness, fuzz-vs-model, concurrency,
                                           Category=Performance guardrails (run by CI)
 benchmarks/DotnetTools.SnapshotCache.Benchmarks/  BenchmarkDotNet classes + console harnesses
