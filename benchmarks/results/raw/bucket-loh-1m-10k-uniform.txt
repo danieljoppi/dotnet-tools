@@ -3,9 +3,9 @@ Largest bucket: 100 entities (1 KB as a reference array); 0 bucket(s) past the 8
 
 | Approach | Heap after build | LOH after build | Batch median | Batch max | Alloc/batch | Gen0/1/2 | LOH after cycles (uncompacted) | LOH after Gen2+compact | Gen2+compact pause | Heap growth (dropped) | Extra retained by held snapshot |
 |---|---:|---:|---:|---:|---:|---|---:|---:|---:|---:|---:|
-| ImmArray_AddRange | 122.4 MiB | 0.0 MiB | 0.1 ms | 0.7 ms | 0.1 MiB | 0/0/0 | 0.0 MiB | 0.0 MiB | 158 ms | 1.6 MiB | 0.9 MiB |
-| List_Then_PublishArray | 130.6 MiB | 0.0 MiB | 0.1 ms | 0.5 ms | 0.2 MiB | 0/0/0 | 0.0 MiB | 0.0 MiB | 195 ms | 2.0 MiB | 0.9 MiB |
-| ChunkedList_Builder | 232.8 MiB | 0.0 MiB | 0.4 ms | 0.9 ms | 1.2 MiB | 0/0/0 | 0.0 MiB | 0.0 MiB | 241 ms | 1.5 MiB | 11.4 MiB |
-| SnapshotTable_Rekeyed | 168.2 MiB | 0.0 MiB | 8.7 ms | 22.3 ms | 10.5 MiB | 6/5/0 | 0.0 MiB | 0.0 MiB | 205 ms | 2.0 MiB | 43.9 MiB |
+| ImmArray_AddRange | 122.4 MiB | 0.0 MiB | 0.1 ms | 0.7 ms | 0.1 MiB | 0/0/0 | 0.0 MiB | 0.0 MiB | 145 ms | 1.6 MiB | 0.9 MiB |
+| List_Then_PublishArray | 130.6 MiB | 0.0 MiB | 0.1 ms | 0.5 ms | 0.2 MiB | 0/0/0 | 0.0 MiB | 0.0 MiB | 152 ms | 2.0 MiB | 0.9 MiB |
+| ChunkedList_Builder | 123.6 MiB | 0.0 MiB | 0.2 ms | 0.7 ms | 0.5 MiB | 0/0/0 | 0.0 MiB | 0.0 MiB | 131 ms | 1.6 MiB | 1.0 MiB |
+| SnapshotTable_Rekeyed | 168.2 MiB | 0.0 MiB | 8.8 ms | 29.7 ms | 10.6 MiB | 1/0/0 | 0.0 MiB | 0.0 MiB | 212 ms | 2.0 MiB | 43.9 MiB |
 
 Reading guide: 'LOH after cycles (uncompacted)' is what the process actually keeps resident between batches without a compacting Gen2 (which .NET does not run on its own unless pressured); the compacted column is the live large-object bytes. 'Extra retained' is the heap cost of pinning the pre-cycle snapshot through all batches.

@@ -44,5 +44,7 @@ The exact threshold is tuning, not architecture: it must be justified by the rea
   read cost is paid only where the alternative is LOH churn.
 - (−) Two representations behind one API (branch per access, conversion logic to test) — the
   price of packaging this once in #8 instead of every consumer hand-rolling it.
-- (−) Until #7 (compact single-chunk representation) lands, the threshold also guards against
-  chunked fixed overhead; #7 may allow lowering or removing it.
+- (+) #7 (compact representation: trimmed tail chunks, grow-by-doubling spine blocks) has landed:
+  chunked-everywhere now costs ~1.1× arrays at rest, so the threshold is driven by the remaining
+  read premium (~2× indexing on small buckets) and per-batch allocation, no longer by resident
+  memory. A lower threshold — or none, where scans dominate reads — is now defensible.

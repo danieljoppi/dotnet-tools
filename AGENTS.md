@@ -107,7 +107,8 @@ Three axes, in this order of non-negotiability, all three always:
 ## Context for ongoing work
 
 - Issue #6 (shared-key → many-values workloads) is measured and documented in RESULTS.md §9–§11.
-- Open follow-ups from those findings: #7 (compact single-chunk representation), #8
+- Follow-ups from those findings: #7 (compact small-list representation — **done**: trimmed tail
+  chunks + grow-by-doubling spine blocks, K=100k store 1.30 GiB → 137.3 MiB), #8
   (`MultiValueSnapshotTable` helper), #9 (chunked secondary-index buckets), #10 (`Builder.AddRange`,
   public target-bytes sizing), #11 (rekeyed `ApplyChanges` profiling), #12 (bench follow-ups:
   CI LOH guardrail, Server GC + p95 study, timing precision, charts).

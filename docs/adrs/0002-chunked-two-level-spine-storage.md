@@ -35,5 +35,7 @@ spine blocks (1024 chunk refs = 8 KB each) → chunks. All three levels stay sub
 - (−) Scattered wide updates converge on a full copy (a random 1% replace of a 100k-element list
   touches nearly every 512-row chunk) — still sub-LOH, but no copy savings; clustered batches and
   appends are the sweet spot (RESULTS.md §7, §9).
-- (−) Fixed per-instance overhead (top spine + 8 KB spine block) is wasteful for tiny lists —
-  measured at ~11.7 KB/bucket at K=100k (RESULTS.md §9); tracked as #7.
+- (−→+) Fixed per-instance overhead (top spine + 8 KB spine block + full-size tail chunk) was
+  wasteful for tiny lists — ~11.7 KB/bucket, 1.30 GiB vs 125 MiB at K=100k. Resolved by #7:
+  spine blocks grow by doubling (4 → 1024 refs) and published tail chunks are trimmed to the
+  element count, bringing the same store to 137.3 MiB (1.10× arrays) with the read path untouched.
