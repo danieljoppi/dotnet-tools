@@ -179,7 +179,96 @@ public sealed class ChunkedImmutableList<T> : IReadOnlyList<T>
     /// until they are written to.</summary>
     public Builder ToBuilder() => new(this);
 
+    /// <summary>
+    /// Enumerates the backing chunks as <see cref="ReadOnlySpan{T}"/> slices of live elements —
+    /// <c>foreach (var span in list.Chunks) { ... }</c>. A full scan then runs as a handful of
+    /// tight span loops (one per chunk) instead of a per-element enumerator, and consumers can
+    /// vectorize each span. Each span exposes exactly the chunk's live elements (the tail is
+    /// <see cref="Count"/>-bounded), never spare capacity. Spans are read-only views into the
+    /// immutable backing arrays.
+    /// </summary>
+    public ChunkSpans Chunks => new(this);
+
+    /// <summary>Copies every element into <paramref name="destination"/> as chunk-sized block
+    /// copies. Throws if the span is shorter than <see cref="Count"/>.</summary>
+    public void CopyTo(Span<T> destination)
+    {
+        if (destination.Length < _count)
+        {
+            throw new ArgumentException("Destination span is shorter than the list.", nameof(destination));
+        }
+        int offset = 0;
+        foreach (var chunk in Chunks)
+        {
+            chunk.CopyTo(destination[offset..]);
+            offset += chunk.Length;
+        }
+    }
+
+    /// <summary>Materializes the list into a new array via chunk-sized copies — faster than the
+    /// element-by-element LINQ <c>ToArray()</c>, which walks the enumerator one call per element.</summary>
+    public T[] ToArray()
+    {
+        if (_count == 0)
+        {
+            return [];
+        }
+        var result = new T[_count];
+        CopyTo(result);
+        return result;
+    }
+
     public Enumerator GetEnumerator() => new(this);
+
+    /// <summary>A <c>foreach</c>-able view over the backing chunks; see <see cref="Chunks"/>.</summary>
+    public readonly struct ChunkSpans
+    {
+        private readonly ChunkedImmutableList<T> _list;
+
+        internal ChunkSpans(ChunkedImmutableList<T> list) => _list = list;
+
+        public ChunkSpanEnumerator GetEnumerator() => new(_list);
+    }
+
+    /// <summary>Yields each chunk's live elements as a <see cref="ReadOnlySpan{T}"/>.</summary>
+    public struct ChunkSpanEnumerator
+    {
+        private readonly T[][][] _blocks;
+        private readonly int _count;
+        private readonly int _shift;
+        private readonly int _chunkCount;
+        private int _chunkIndex; // -1 before the first MoveNext
+        private T[] _chunk;
+        private int _liveLength;
+
+        internal ChunkSpanEnumerator(ChunkedImmutableList<T> list)
+        {
+            _blocks = list._blocks;
+            _count = list._count;
+            _shift = list._shift;
+            _chunkCount = _count == 0 ? 0 : ((_count - 1) >> _shift) + 1;
+            _chunkIndex = -1;
+            _chunk = [];
+            _liveLength = 0;
+        }
+
+        public readonly ReadOnlySpan<T> Current => _chunk.AsSpan(0, _liveLength);
+
+        public bool MoveNext()
+        {
+            int next = _chunkIndex + 1;
+            if (next >= _chunkCount)
+            {
+                return false;
+            }
+            _chunk = _blocks[next >> SpineBlockShift][next & SpineBlockMask];
+            // Bound by Count so the tail exposes only live elements even if a chunk ever carried
+            // spare capacity (published tails are trimmed, so this is normally chunk.Length).
+            _liveLength = Math.Min(_chunk.Length, _count - (next << _shift));
+            _chunkIndex = next;
+            return true;
+        }
+    }
 
     IEnumerator<T> IEnumerable<T>.GetEnumerator() => GetEnumerator();
 
