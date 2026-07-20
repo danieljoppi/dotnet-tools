@@ -1,0 +1,24 @@
+# Issue #31 A/B: same-key Append folding in MultiValueSnapshotTable.ApplyChanges
+#
+# Shape: one promoted bucket of 100,000 entities; each cycle emits 50 BucketChange.Append
+# entries of 1 entity each to that same key. 200 cycles, best of 2 rounds, workstation GC,
+# .NET 10, same VM for both builds. "one batch" applies all 50 changes in a single
+# ApplyChanges call; "50 separate batches" applies them one call each (upper bound: also
+# pays 50 shard clones + snapshot swaps, which the pre-#31 single-batch path did not).
+#
+# Library BEFORE #31 (commit 1e4f2f6 — every Append pays ToBuilder -> ToImmutable):
+promoted bucket of 100,000, 50 same-key 1-entity Appends per cycle, 200 cycles:
+  50 separate batches (== pre-#31 per-change publishes): 0.13 ms/cycle, 445 KB/cycle
+  one batch, folded builder (#31):                       0.10 ms/cycle, 422 KB/cycle
+  ratio: 1.3x time, 1.1x alloc
+#
+# Library AFTER #31 (per-batch builder cache — one publish per touched key):
+promoted bucket of 100,000, 50 same-key 1-entity Appends per cycle, 200 cycles:
+  50 separate batches (== pre-#31 per-change publishes): 0.12 ms/cycle, 455 KB/cycle
+  one batch, folded builder (#31):                       0.01 ms/cycle, 9 KB/cycle
+  ratio: 12.6x time, 48.4x alloc
+#
+# Verdict: the same one-batch, 50-same-key-append cycle drops 0.10 -> 0.01 ms and
+# 422 -> 9 KB (~10x time, ~47x alloc). Callers that already coalesce into one
+# Append(key, manyEntities) were never paying this; callers that emit one Append per
+# entity now get the coalesced cost automatically.
