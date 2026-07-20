@@ -26,6 +26,7 @@ The suite models the real workload — a large table in memory, refreshed in bat
 | Hot read path | 10,000 random point lookups per invocation | `ReadBenchmarks` |
 | Batch-size sweep with removes (§11) | 1k / 10k / 50k upserts, 0% / 10% removes, mid-width row | `UniqueKeyBatchBenchmarks` |
 | Shared-key one-to-many buckets (§9) | 1M entities over 10k / 100k shared keys, uniform + Zipf | `SharedKeyBucketBenchmarks` |
+| Bucket read path (§9) | 10k hot-weighted indexed reads + full 1M-entity scans | `BucketReadBenchmarks` |
 | Single large refresh over skewed buckets (§10) | ~12k entity ops across 800 of 2,000 keys, 15 LOH-sized buckets | `LargeRefreshBenchmarks` |
 
 Row type for the batch scenario: `record Row(long Id, string Name, decimal Balance, DateTime UpdatedAt)`
@@ -382,6 +383,29 @@ approaches win everything): [`bucket-loh-1m-10k-zipf.txt`](results/raw/bucket-lo
   and the current secondary index copies its bucket per change (documented for buckets up to the
   low thousands), so it is **not** suitable for 10k+ entity groups. See API gaps below.
 
+### The read side — what the LOH win costs per lookup and per scan
+
+Reads are the path a cache serves all day, so the batch/LOH tables above are only half the
+decision (ADR-0005). `BucketReadBenchmarks` measures the same populations read-only (no state
+restore → stable timings, zero allocation on every row):
+
+| Access pattern (1M entities, K=10k) | ImmutableArray | ChunkedImmutableList | SnapshotTable_Rekeyed |
+|---|---:|---:|---:|
+| 10k random indexed reads, hot-weighted (Zipf) | **222 μs (~22 ns)** | 448 μs (~45 ns, 2.0×) | 1,230 μs (~123 ns, 5.5×) |
+| 10k random indexed reads (Uniform) | **270 μs (~27 ns)** | 707 μs (~71 ns, 2.6×) | 1,240 μs (~124 ns, 4.6×) |
+| Scan all 1M entities (Zipf) | **8.6 ms (~8.6 ns/entity)** | 12.2 ms (~12 ns, 1.4×) | n/a — needs group index (#9) |
+| Scan all 1M entities (Uniform) | **7.6 ms (~7.6 ns/entity)** | 11.6 ms (~12 ns, 1.5×) | n/a |
+
+Raw: [`BucketReadBenchmarks-report-github.md`](results/raw/DotnetTools.SnapshotCache.Benchmarks.BucketReadBenchmarks-report-github.md).
+
+How to read it: the chunked list's three-array-hop indexer costs ~2–2.6× a contiguous array on
+random access, and sequential scans — the aggregation/report path — pay a milder 1.4–1.5× because
+the enumerator only re-resolves a chunk every 512 elements. The rekeyed table pays the full
+shard-directory + chunk hop per lookup (~123 ns, consistent with §2) and cannot enumerate one
+group at all without the secondary index (#9). None of the read premiums allocate. This is the
+quantified case for the hybrid recommendation below: keep small buckets as arrays (best reads,
+LOH unreachable), pay the chunked read premium only where the alternative is LOH churn.
+
 ### Recommendation: which shape fits which store
 
 | Your buckets | Use |
@@ -475,6 +499,7 @@ dotnet benchmarks/DotnetTools.SnapshotCache.Benchmarks/bin/Release/net10.0/Dotne
 
 # shared-key bucket workloads (§9-§11):
 dotnet run -c Release --project benchmarks/DotnetTools.SnapshotCache.Benchmarks -- --filter '*SharedKeyBucket*' --job short --memory
+dotnet run -c Release --project benchmarks/DotnetTools.SnapshotCache.Benchmarks -- --filter '*BucketRead*' --job short --memory
 dotnet run -c Release --project benchmarks/DotnetTools.SnapshotCache.Benchmarks -- --filter '*LargeRefresh*' --job short --memory
 dotnet run -c Release --project benchmarks/DotnetTools.SnapshotCache.Benchmarks -- --filter '*UniqueKeyBatch*' --job short --memory
 
