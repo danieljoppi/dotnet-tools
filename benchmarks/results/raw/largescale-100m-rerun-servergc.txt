@@ -1,0 +1,26 @@
+# Large-scale validation: 100,000,000 rows, 20,000 changes/cycle, 10 cycles
+GC mode: Server, process: 4 cores
+
+Initial load: 19.2 s (5.2 M rows/s)
+Heap after load: 3.39 GiB (LOH: 0.0 MiB)
+
+| Cycle | Apply time | Allocated (writer) | Table rows |
+|---|---|---|---|
+| 1 | 104.1 ms | 83.6 MiB | 100,004,000 |
+| 2 | 107.7 ms | 83.6 MiB | 100,008,000 |
+| 3 | 122.1 ms | 83.7 MiB | 100,012,000 |
+| 4 | 139.2 ms | 83.5 MiB | 100,016,000 |
+| 5 | 120.6 ms | 83.5 MiB | 100,020,000 |
+| 6 | 137.3 ms | 83.5 MiB | 100,024,000 |
+| 7 | 148.5 ms | 83.5 MiB | 100,028,000 |
+| 8 | 117.0 ms | 83.5 MiB | 100,032,000 |
+| 9 | 119.9 ms | 83.5 MiB | 100,036,000 |
+| 10 | 289.3 ms | 83.6 MiB | 100,040,000 |
+
+Apply time: median 122.1 ms, max 289.3 ms (budget: 30,000 ms per cycle)
+GC during 10 cycles: Gen0=3 Gen1=0 Gen2=0
+Concurrent read throughput during refreshes: 1.95 M lookups/s across 2 readers
+LOH size: after load 0.0 MiB → final 0.0 MiB (growth 0.0 MiB)
+Final heap: 3.39 GiB, table rows: 100,040,000
+
+RESULT: PASS (LOH growth none, refresh fits budget: True)
