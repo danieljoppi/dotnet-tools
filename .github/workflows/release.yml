@@ -1,0 +1,69 @@
+name: Release
+
+# Publishes the library when a version tag is pushed:
+#   git tag v0.3.0 && git push origin v0.3.0
+# The tag must match the <Version> in src/DotnetTools.SnapshotCache/*.csproj (verified below, so
+# a mismatched tag fails fast instead of shipping a package that claims a different version).
+#
+# Steps: build → full test suite → pack → GitHub Release with the .nupkg/.snupkg attached →
+# push to NuGet.org if the NUGET_API_KEY repository secret is configured (skipped with a notice
+# otherwise, so the pipeline works before the secret exists).
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write # create the GitHub Release
+
+jobs:
+  release:
+    name: Pack & publish
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Verify tag matches csproj version
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          CSPROJ_VERSION=$(grep -oPm1 '(?<=<Version>)[^<]+' src/DotnetTools.SnapshotCache/DotnetTools.SnapshotCache.csproj)
+          echo "tag=$TAG_VERSION csproj=$CSPROJ_VERSION"
+          if [ "$TAG_VERSION" != "$CSPROJ_VERSION" ]; then
+            echo "::error::Tag v$TAG_VERSION does not match <Version>$CSPROJ_VERSION</Version> — bump the csproj first."
+            exit 1
+          fi
+
+      - name: Build
+        run: dotnet build -c Release
+
+      - name: Run full test suite
+        run: dotnet test tests/DotnetTools.SnapshotCache.Tests -c Release --no-build
+
+      - name: Pack
+        run: dotnet pack src/DotnetTools.SnapshotCache -c Release --no-build -o packages
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" packages/*.nupkg packages/*.snupkg \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "DotnetTools.SnapshotCache $GITHUB_REF_NAME" \
+            --generate-notes
+
+      - name: Push to NuGet.org
+        env:
+          NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
+        run: |
+          if [ -z "$NUGET_API_KEY" ]; then
+            echo "::notice::NUGET_API_KEY secret not configured — package attached to the GitHub Release only."
+            exit 0
+          fi
+          dotnet nuget push packages/*.nupkg \
+            --api-key "$NUGET_API_KEY" \
+            --source https://api.nuget.org/v3/index.json \
+            --skip-duplicate

@@ -31,11 +31,16 @@ namespace DotnetTools.SnapshotCache;
 /// </summary>
 public sealed class ChunkedImmutableList<T> : IReadOnlyList<T>
 {
-    // Spine geometry: 1024 chunk references per spine block = 8 KB per block on 64-bit.
+    // Spine geometry: up to 1024 chunk references per spine block = 8 KB per block on 64-bit.
+    // Blocks are allocated small and grown by doubling, so a list holding a handful of chunks
+    // pays a few dozen bytes of spine, not 8 KB — important when many small lists coexist
+    // (e.g. one bucket per shared key). Indexing is unaffected: a block's length is always
+    // ≥ the number of chunks it holds, so reads never bounds-check against the block cap.
     private const int SpineBlockShift = 10;
     internal const int SpineBlockLength = 1 << SpineBlockShift;
     private const int SpineBlockMask = SpineBlockLength - 1;
     private const int SpineBlockOwnershipWords = SpineBlockLength / 64;
+    private const int InitialSpineBlockLength = 4;
 
     // Default chunk payload target. 4 KB balances copy-on-write waste for sparse random batches
     // against per-array overhead; hard cap keeps any chunk safely below the 85,000-byte LOH bar.
@@ -322,6 +327,25 @@ public sealed class ChunkedImmutableList<T> : IReadOnlyList<T>
             {
                 return _shift == DefaultShift ? Empty : new ChunkedImmutableList<T>([], 0, _shift);
             }
+            // Trim a partially filled tail chunk to its exact element count, so a list of 10
+            // elements retains a 10-slot array, not a full chunk. Reads are unaffected (indexes
+            // into the tail are bounded by Count); the builder re-expands the tail to full chunk
+            // size on the next append.
+            int tail = _count & _mask;
+            if (tail != 0)
+            {
+                int lastChunk = _chunkCount - 1;
+                int b = lastChunk >> SpineBlockShift;
+                int s = lastChunk & SpineBlockMask;
+                var chunk = _blocks[b][s];
+                if (chunk.Length != tail)
+                {
+                    var trimmed = new T[tail];
+                    Array.Copy(chunk, trimmed, tail);
+                    EnsureBlockOwned(b);
+                    _blocks[b][s] = trimmed;
+                }
+            }
             int blockCount = ((_chunkCount - 1) >> SpineBlockShift) + 1;
             var top = new T[blockCount][][];
             Array.Copy(_blocks, top, blockCount);
@@ -347,7 +371,12 @@ public sealed class ChunkedImmutableList<T> : IReadOnlyList<T>
             var owned = _chunkOwned[b]!;
             if ((owned[s >> 6] & (1UL << s)) == 0)
             {
-                block[s] = (T[])block[s].Clone();
+                // Clone at full chunk size: the shared source may be a trimmed tail chunk
+                // (published by ToImmutable), and an owned chunk must accept appends.
+                var source = block[s];
+                var copy = new T[1 << _shift];
+                Array.Copy(source, copy, source.Length);
+                block[s] = copy;
                 owned[s >> 6] |= 1UL << s;
             }
             return block[s];
@@ -366,13 +395,17 @@ public sealed class ChunkedImmutableList<T> : IReadOnlyList<T>
             }
             if (s == 0 || _blocks[b] is null)
             {
-                _blocks[b] = new T[SpineBlockLength][];
+                _blocks[b] = new T[InitialSpineBlockLength][];
                 _blockOwned[b >> 6] |= 1UL << b;
                 _chunkOwned[b] = new ulong[SpineBlockOwnershipWords];
             }
             else
             {
                 EnsureBlockOwned(b);
+                if (s == _blocks[b].Length)
+                {
+                    Array.Resize(ref _blocks[b], Math.Min(SpineBlockLength, _blocks[b].Length * 2));
+                }
             }
             _blocks[b][s] = new T[1 << _shift];
             _chunkOwned[b]![s >> 6] |= 1UL << s;
