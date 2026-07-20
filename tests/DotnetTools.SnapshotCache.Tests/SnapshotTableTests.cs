@@ -8,7 +8,7 @@ public class SnapshotTableTests
     public void NewTable_IsEmpty()
     {
         var table = new SnapshotTable<long, string>();
-        Assert.Equal(0, table.Count);
+        Assert.Empty(table);
         Assert.False(table.TryGetValue(1, out _));
     }
 
@@ -39,7 +39,7 @@ public class SnapshotTableTests
         table.Upsert(1, "a");
         Assert.True(table.Remove(1));
         Assert.False(table.Remove(1));
-        Assert.Equal(0, table.Count);
+        Assert.Empty(table);
     }
 
     [Fact]

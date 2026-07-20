@@ -350,7 +350,7 @@ public class NotificationAndParallelResetTests
 
         Assert.False(table.TryRemove(1, out var missing));
         Assert.Null(missing);
-        Assert.Equal(1, table.Count);
+        Assert.Single(table);
     }
 
     [Fact]
