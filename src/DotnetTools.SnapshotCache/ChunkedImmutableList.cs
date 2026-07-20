@@ -29,6 +29,8 @@ namespace DotnetTools.SnapshotCache;
 /// make sparse random batches cheaper to copy (ideal for huge tables refreshed with relatively
 /// small batches); larger chunks favor dense updates and sequential scans.
 /// </summary>
+[System.Diagnostics.DebuggerDisplay("Count = {Count}")]
+[System.Diagnostics.DebuggerTypeProxy(typeof(ChunkedImmutableList<>.DebugView))]
 public sealed class ChunkedImmutableList<T> : IReadOnlyList<T>
 {
     // Spine geometry: up to 1024 chunk references per spine block = 8 KB per block on 64-bit.
@@ -147,6 +149,81 @@ public sealed class ChunkedImmutableList<T> : IReadOnlyList<T>
         builder.AddRange(items);
         return builder.ToImmutable();
     }
+
+    /// <summary>Builds a list from a span, copied chunk-by-chunk (no intermediate array).</summary>
+    public static ChunkedImmutableList<T> CreateRange(ReadOnlySpan<T> items)
+    {
+        if (items.IsEmpty)
+        {
+            return Empty;
+        }
+        var builder = Empty.ToBuilder();
+        builder.AddRange(items);
+        return builder.ToImmutable();
+    }
+
+    /// <summary>Builds a list from an array. An explicit overload so array arguments bind here
+    /// (not ambiguously between the span and enumerable overloads) on every target framework.</summary>
+    public static ChunkedImmutableList<T> CreateRange(T[] items)
+    {
+        ArgumentNullException.ThrowIfNull(items);
+        return CreateRange(items.AsSpan());
+    }
+
+    /// <summary>Returns a new list with <paramref name="items"/> appended — a builder round-trip
+    /// packaged as one call. Copies each touched chunk once; untouched structure is shared.</summary>
+    public ChunkedImmutableList<T> AddRange(ReadOnlySpan<T> items)
+    {
+        if (items.IsEmpty)
+        {
+            return this;
+        }
+        var builder = ToBuilder();
+        builder.AddRange(items);
+        return builder.ToImmutable();
+    }
+
+    /// <summary>Array overload of <see cref="AddRange(ReadOnlySpan{T})"/> — binds array arguments
+    /// unambiguously across target frameworks.</summary>
+    public ChunkedImmutableList<T> AddRange(T[] items)
+    {
+        ArgumentNullException.ThrowIfNull(items);
+        return AddRange(items.AsSpan());
+    }
+
+    /// <inheritdoc cref="AddRange(ReadOnlySpan{T})"/>
+    public ChunkedImmutableList<T> AddRange(IEnumerable<T> items)
+    {
+        ArgumentNullException.ThrowIfNull(items);
+        var builder = ToBuilder();
+        builder.AddRange(items);
+        return builder.ToImmutable();
+    }
+
+    /// <summary>Index of the first element equal to <paramref name="value"/> under
+    /// <see cref="EqualityComparer{T}.Default"/>, or -1. Scans chunk-by-chunk via
+    /// <see cref="Chunks"/> — a span walk, not the per-element enumerator.</summary>
+    public int IndexOf(T value)
+    {
+        var comparer = EqualityComparer<T>.Default;
+        int baseIndex = 0;
+        foreach (var span in Chunks)
+        {
+            for (int i = 0; i < span.Length; i++)
+            {
+                if (comparer.Equals(span[i], value))
+                {
+                    return baseIndex + i;
+                }
+            }
+            baseIndex += span.Length;
+        }
+        return -1;
+    }
+
+    /// <summary>Whether any element equals <paramref name="value"/> under
+    /// <see cref="EqualityComparer{T}.Default"/>.</summary>
+    public bool Contains(T value) => IndexOf(value) >= 0;
 
     /// <summary>Returns a new list with the element at <paramref name="index"/> replaced.
     /// Copies the top spine, one spine block, and one chunk; everything else is shared.</summary>
@@ -324,12 +401,25 @@ public sealed class ChunkedImmutableList<T> : IReadOnlyList<T>
         }
     }
 
+    /// <summary>Debugger proxy: shows elements instead of the raw <c>T[][][]</c> spine.</summary>
+    internal sealed class DebugView
+    {
+        private readonly ChunkedImmutableList<T> _list;
+
+        public DebugView(ChunkedImmutableList<T> list) => _list = list;
+
+        [System.Diagnostics.DebuggerBrowsable(System.Diagnostics.DebuggerBrowsableState.RootHidden)]
+        public T[] Items => _list.ToArray();
+    }
+
     /// <summary>
     /// A mutable builder with copy-on-write at both granularities: a spine block is cloned the
     /// first time any chunk under it changes, and a chunk is cloned the first time it is written.
     /// Ownership is tracked in small bitsets, so builder bookkeeping itself never touches the LOH.
     /// Use one builder per update batch, then call <see cref="ToImmutable"/> and publish the result.
     /// </summary>
+    [System.Diagnostics.DebuggerDisplay("Count = {Count}")]
+    [System.Diagnostics.DebuggerTypeProxy(typeof(ChunkedImmutableList<>.Builder.DebugView))]
     public sealed class Builder
     {
         private readonly int _shift;
@@ -565,6 +655,28 @@ public sealed class ChunkedImmutableList<T> : IReadOnlyList<T>
                 _blocks[b] = (T[][])_blocks[b].Clone();
                 _blockOwned[b >> 6] |= 1UL << b;
                 _chunkOwned[b] = new ulong[SpineBlockOwnershipWords];
+            }
+        }
+
+        /// <summary>Debugger proxy showing the builder's current elements.</summary>
+        internal sealed class DebugView
+        {
+            private readonly Builder _builder;
+
+            public DebugView(Builder builder) => _builder = builder;
+
+            [System.Diagnostics.DebuggerBrowsable(System.Diagnostics.DebuggerBrowsableState.RootHidden)]
+            public T[] Items
+            {
+                get
+                {
+                    var items = new T[_builder._count];
+                    for (int i = 0; i < items.Length; i++)
+                    {
+                        items[i] = _builder[i];
+                    }
+                    return items;
+                }
             }
         }
     }
