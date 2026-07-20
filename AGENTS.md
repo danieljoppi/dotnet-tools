@@ -113,9 +113,11 @@ Three axes, in this order of non-negotiability, all three always:
   member groups with zero LOH), #10 **done** (`Builder.AddRange` span/enumerable, public
   `EmptyWithTargetBytes`). #11 **partially done** (RESULTS.md §12: hash/equality devirtualized
   for value-type keys with the default comparer — 10M rekeyed batch 219.6 → 118.8 ms; index
-  writer batches all changes to one promoted bucket through a single builder). Open: #8
-  (`MultiValueSnapshotTable` helper), #11's remainder (index-writer bookkeeping, chunk scatter),
-  #12 (bench follow-ups: Server GC + p95 study, timing precision, charts).
+  writer batches all changes to one promoted bucket through a single builder). #8 **done**
+  (`MultiValueSnapshotTable<TKey, TEntity>`: the packaged hybrid bucket store — batch parity with
+  raw chunked, 1.02× arrays at rest, 0.0 LOH; reads pay `IReadOnlyList` interface dispatch, a
+  typed scan API is the noted follow-up). Open: #11's remainder (index-writer bookkeeping, chunk
+  scatter), #12 (bench follow-ups: Server GC + p95 study, timing precision, charts).
 - Bucket *read* performance (chunked indexing/enumeration vs contiguous arrays) is measured in
   `BucketReadBenchmarks` — keep it in the loop whenever bucket representations change, and use it
   before tightening the §9 recommendation thresholds.

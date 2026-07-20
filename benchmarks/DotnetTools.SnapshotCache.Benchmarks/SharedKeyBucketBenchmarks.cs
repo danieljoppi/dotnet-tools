@@ -52,6 +52,9 @@ public abstract class BucketBenchmarksBase
     private KeyValuePair<(long, long), Entity>[] _flatBatch = null!;
     private KeyValuePair<(long, long), Entity>[] _tableRestoreUpserts = null!;
     private (long, long)[] _tableRestoreRemoves = null!;
+    private MultiValueSnapshotTable<long, Entity> _multiValue = null!;
+    private BucketChange<long, Entity>[] _bucketBatch = null!;
+    private BucketChange<long, Entity>[] _multiValueRestore = null!;
 
     [GlobalSetup]
     public void Setup()
@@ -93,6 +96,17 @@ public abstract class BucketBenchmarksBase
             .SelectMany(c => c.Replacements.Select(r =>
                 KeyValuePair.Create(((long)c.GroupId, r.Value.Id), _pristine[c.GroupId][r.Index])))
             .ToArray();
+
+        _multiValue = new MultiValueSnapshotTable<long, Entity>(keyCapacityHint: k);
+        _multiValue.Reset(_pristine.Select((b, g) => KeyValuePair.Create((long)g, (IReadOnlyList<Entity>)b)));
+        _bucketBatch = _batch
+            .Select(c => c.Appends.Length > 0
+                ? BucketChange.Append((long)c.GroupId, c.Appends)
+                : BucketChange.ReplaceAt((long)c.GroupId, c.Replacements))
+            .ToArray();
+        _multiValueRestore = _batch
+            .Select(c => BucketChange.ReplaceBucket((long)c.GroupId, _pristine[c.GroupId]))
+            .ToArray();
     }
 
     /// <summary>Rolls every store back to the pristine population so each invocation applies the
@@ -110,6 +124,7 @@ public abstract class BucketBenchmarksBase
             list.AddRange(_pristine[g]);
         }
         _table.ApplyChanges(_tableRestoreUpserts, _tableRestoreRemoves);
+        _multiValue.ApplyChanges(_multiValueRestore);
     }
 
     [Benchmark(Description = "ImmArray_AddRange")]
@@ -188,6 +203,13 @@ public abstract class BucketBenchmarksBase
     {
         _table.ApplyChanges(_flatBatch);
         return _table.Count;
+    }
+
+    [Benchmark(Description = "MultiValueSnapshotTable")]
+    public int MultiValue_Table()
+    {
+        _multiValue.ApplyChanges(_bucketBatch);
+        return _multiValue.KeyCount;
     }
 }
 

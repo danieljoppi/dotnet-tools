@@ -41,6 +41,7 @@ public class BucketReadBenchmarks
     private ChunkedImmutableList<Entity>[] _chunked = null!;
     private SnapshotTable<(long GroupId, long EntityId), Entity>.TableSnapshot _snapshot = null!;
     private TableIndex<(long GroupId, long EntityId), Entity, long> _byGroup = null!;
+    private MultiValueSnapshotTable<long, Entity>.TableSnapshot _multiValueSnapshot = null!;
     private (int Group, int Index)[] _probes = null!;
     private (long, long)[] _probeKeys = null!;
 
@@ -58,6 +59,10 @@ public class BucketReadBenchmarks
         _byGroup = table.CreateIndex((_, e) => e.GroupId);
         table.Reset(pristine.SelectMany(b => b.Select(e => KeyValuePair.Create((e.GroupId, e.Id), e))));
         _snapshot = table.GetSnapshot();
+
+        var multiValue = new MultiValueSnapshotTable<long, Entity>(keyCapacityHint: K);
+        multiValue.Reset(pristine.Select((b, g) => KeyValuePair.Create((long)g, (IReadOnlyList<Entity>)b)));
+        _multiValueSnapshot = multiValue.GetSnapshot();
 
         // Probes sampled uniformly over entities (∝ bucket size): a random global position maps
         // to its bucket + local index, so under skew the hot buckets absorb most reads.
@@ -142,6 +147,34 @@ public class BucketReadBenchmarks
             foreach (var entity in bucket)
             {
                 sum += entity.Kind;
+            }
+        }
+        return sum;
+    }
+
+    [Benchmark(Description = "MultiValueTable bucket[i] x10k (hot-weighted)")]
+    public long MultiValue_RandomIndex()
+    {
+        // Buckets come back as IReadOnlyList<Entity> (array or chunked behind the interface), so
+        // this pays interface dispatch per element — the honest access path of the packaged type.
+        long sum = 0;
+        foreach (var (group, index) in _probes)
+        {
+            sum += _multiValueSnapshot.Lookup(group)[index].Kind;
+        }
+        return sum;
+    }
+
+    [Benchmark(Description = "MultiValueTable scan all buckets (1M entities)")]
+    public long MultiValue_ScanAllBuckets()
+    {
+        long sum = 0;
+        for (long g = 0; g < K; g++)
+        {
+            var bucket = _multiValueSnapshot.Lookup(g);
+            for (int i = 0; i < bucket.Count; i++)
+            {
+                sum += bucket[i].Kind;
             }
         }
         return sum;

@@ -314,12 +314,12 @@ key either append 1–50 entities or replace ~1% of the bucket.
 
 ### Batch cost (BenchmarkDotNet, ShortRun, medians; state restored between iterations)
 
-| K / skew | ImmArray_AddRange | List_Then_PublishArray | ChunkedList_Builder | SnapshotTable_Rekeyed |
-|---|---:|---:|---:|---:|
-| 10k / Uniform (buckets ≈100) | **88 μs / 91 KB** | 109 μs / 91 KB | 250 μs / 535 KB | 3.9 ms / 10.8 MB |
-| 10k / Zipf (hot ≈102k) | 1.36 ms / 3.24 MB | 1.22 ms / 3.24 MB | **0.52 ms / 1.42 MB** | 5.3 ms / 12.9 MB |
-| 100k / Uniform (buckets ≈10) | **0.41 ms / 199 KB** | 0.50 ms / 199 KB | 1.62 ms / 4.64 MB | 19.5 ms / 45.8 MB |
-| 100k / Zipf | 1.76 ms / 4.06 MB | **1.78 ms / 4.06 MB** | 2.40 ms / 7.02 MB | 21.7 ms / 48.6 MB |
+| K / skew | ImmArray_AddRange | List_Then_PublishArray | ChunkedList_Builder | SnapshotTable_Rekeyed | MultiValueSnapshotTable (#8) |
+|---|---:|---:|---:|---:|---:|
+| 10k / Uniform (buckets ≈100) | **88 μs / 91 KB** | 109 μs / 91 KB | 250 μs / 535 KB | 3.9 ms / 10.8 MB | 266 μs / 316 KB |
+| 10k / Zipf (hot ≈102k) | 1.36 ms / 3.24 MB | 1.22 ms / 3.24 MB | **0.52 ms / 1.42 MB** | 5.3 ms / 12.9 MB | 0.54 ms / 1.39 MB |
+| 100k / Uniform (buckets ≈10) | **0.41 ms / 199 KB** | 0.50 ms / 199 KB | 1.62 ms / 4.64 MB | 19.5 ms / 45.8 MB | 2.09 ms / 2.64 MB |
+| 100k / Zipf | 1.76 ms / 4.06 MB | **1.78 ms / 4.06 MB** | 2.40 ms / 7.02 MB | 21.7 ms / 48.6 MB | 3.29 ms / 5.58 MB |
 
 (Numbers are from the current core, which includes issue #7's compact small-list representation —
 trimmed tail chunks + grow-by-doubling spine blocks. It halved the chunked columns across the
@@ -338,15 +338,22 @@ Zipf, K=10k — **1M entities**:
 | List_Then_PublishArray | 4.4 MiB | **31.4 MiB** | 10.0 MiB | 7.3 MiB |
 | **ChunkedList_Builder** | **0.0 MiB** | **0.0 MiB** | **0.0 MiB** | 7.0 MiB |
 | **SnapshotTable_Rekeyed** | **0.0 MiB** | **0.0 MiB** | **0.0 MiB** | 52.0 MiB |
+| **MultiValueSnapshotTable** | **0.0 MiB** | **0.0 MiB** | **0.0 MiB** | 7.3 MiB |
 
 Zipf, K=10k — **10M entities** (hottest bucket ~1.02M entities ≈ 7.8 MiB per copy):
 
 | Approach | LOH after build | LOH after 10 batches (uncompacted) | LOH after forced Gen2+compact | Batch median |
 |---|---:|---:|---:|---:|
-| ImmArray_AddRange | 40.1 MiB | **291.6 MiB** | 79.4 MiB | 128.7 ms |
-| List_Then_PublishArray | 80.2 MiB | **406.6 MiB** | 159.9 MiB | 135.3 ms |
-| **ChunkedList_Builder** | **0.0 MiB** | **0.0 MiB** | **0.0 MiB** | **6.8 ms** |
-| **SnapshotTable_Rekeyed** | **0.0 MiB** | **0.0 MiB** | **0.0 MiB** | 219.6 ms |
+| ImmArray_AddRange | 40.1 MiB | **291.6 MiB** | 79.4 MiB | 106.3 ms |
+| List_Then_PublishArray | 80.2 MiB | **406.6 MiB** | 159.9 MiB | 23.7 ms¹ |
+| **ChunkedList_Builder** | **0.0 MiB** | **0.0 MiB** | **0.0 MiB** | **5.1 ms** |
+| **SnapshotTable_Rekeyed** | **0.0 MiB** | **0.0 MiB** | **0.0 MiB** | 212.7 ms¹ |
+| **MultiValueSnapshotTable** | **0.0 MiB** | **0.0 MiB** | **0.0 MiB** | 8.1 ms |
+
+¹ Timings on the array and rekeyed rows swing hard between sessions on this shared VM (List
+23.7–135 ms median, rekeyed 118.8–219.6 ms across runs; §12's controlled before/after pair is
+the devirtualization comparison). The chunked/multi-value ~5–8 ms medians and every LOH column
+are stable across all runs.
 
 At 10M the chunked buckets are no longer just the LOH-safe option — they are ~20× faster per
 batch than either array approach, because a warm batch copies a few 4 KB chunks per hot bucket
@@ -401,12 +408,12 @@ Reads are the path a cache serves all day, so the batch/LOH tables above are onl
 decision (ADR-0005). `BucketReadBenchmarks` measures the same populations read-only (no state
 restore → stable timings, zero allocation on every row):
 
-| Access pattern (1M entities, K=10k) | ImmutableArray | ChunkedImmutableList | SnapshotTable_Rekeyed |
-|---|---:|---:|---:|
-| 10k random indexed reads, hot-weighted (Zipf) | **136 μs (~14 ns)** | 310 μs (~31 ns, 2.3×) | 1,791 μs (~179 ns)³ |
-| 10k random indexed reads (Uniform) | **183 μs (~18 ns)** | 385 μs (~38 ns, 2.1×) | 1,884 μs (~188 ns)³ |
-| Scan all 1M entities (Zipf) | **4.5 ms (~4.5 ns/entity)** | 4.7 ms (~4.7 ns, 1.05×) | 137 ms via group index⁴ |
-| Scan all 1M entities (Uniform) | **4.5 ms (~4.5 ns/entity)** | 5.6 ms (~5.6 ns, 1.25×) | 149 ms via group index⁴ |
+| Access pattern (1M entities, K=10k) | ImmutableArray | ChunkedImmutableList | SnapshotTable_Rekeyed | MultiValueSnapshotTable (#8) |
+|---|---:|---:|---:|---:|
+| 10k random indexed reads, hot-weighted (Zipf) | **136 μs (~14 ns)** | 310 μs (~31 ns, 2.3×) | 1,791 μs (~179 ns)³ | 700 μs (~70 ns)⁵ |
+| 10k random indexed reads (Uniform) | **183 μs (~18 ns)** | 385 μs (~38 ns, 2.1×) | 1,884 μs (~188 ns)³ | 597 μs (~60 ns)⁵ |
+| Scan all 1M entities (Zipf) | **4.5 ms (~4.5 ns/entity)** | 4.7 ms (~4.7 ns, 1.05×) | 137 ms via group index⁴ | 9.5 ms⁵ |
+| Scan all 1M entities (Uniform) | **4.5 ms (~4.5 ns/entity)** | 5.6 ms (~5.6 ns, 1.25×) | 149 ms via group index⁴ | 5.2 ms⁵ |
 
 ³ Table-lookup timings carried a wide error band in this run (±2 ms); §2's steadier measurement
 puts the per-lookup cost at ~60–120 ns. The 4–10× ratio band vs a contiguous array is the signal.
@@ -415,6 +422,12 @@ puts the per-lookup cost at ~60–120 ns. The 4–10× ratio band vs a contiguou
 row lookups against one consistent snapshot. It is point-lookup-bound (~140 ns/entity), ~30×
 a direct chunked-bucket scan, allocating only ~320 KB of enumerators for all 10k groups — the
 price of full atomicity when the entities live in one re-keyed table rather than per-key buckets.
+
+⁵ `MultiValueSnapshotTable.Lookup` returns `IReadOnlyList<TEntity>` (array or chunked behind the
+interface), so element access pays interface dispatch: ~2× raw chunked on hot-weighted indexing,
+and scans land between the array and doubled-chunked cost depending on how many probes hit
+promoted buckets. A typed scan API (pattern-matching the concrete bucket) is the obvious
+follow-up if scan-heavy consumers adopt the packaged type.
 
 Raw: [`BucketReadBenchmarks-report-github.md`](results/raw/DotnetTools.SnapshotCache.Benchmarks.BucketReadBenchmarks-report-github.md).
 (Re-measured after issues #7/#9; the array/chunked ratios were identical before — the compact
@@ -434,7 +447,7 @@ chunked read premium only where the alternative is LOH churn.
 |---|---|
 | Reliably small (≤ ~2k entities, payload « 85 KB) | `ImmutableArray.AddRange` or `List` → publish — cheapest on every metric, LOH never involved |
 | Can grow past ~10k references / 85 KB (skewed one-to-many) | `ChunkedImmutableList` builder per bucket — zero LOH at any size, O(touched chunks) batches, cheap held snapshots for append-shaped churn |
-| Real Zipf population (most buckets tiny, a hot head) | Hybrid: arrays below a size threshold, `ChunkedImmutableList` above (~2k entities). Since #7 the driver is reads + per-batch alloc, not resident memory — chunked-everywhere now costs ~1.1× arrays at rest and is acceptable when a single representation is worth the ~2× read premium on small buckets |
+| Real Zipf population (most buckets tiny, a hot head) | **`MultiValueSnapshotTable` (issue #8)** — the packaged hybrid: arrays ≤1,024 entities, chunked beyond, atomic `ApplyChanges` batches, wait-free snapshots. Resident heap 1.02× arrays, batch cost at chunked parity, 0.0 MiB LOH; reads pay interface dispatch (~2× raw chunked on hot buckets) |
 | Need atomic multi-key batches, consistent snapshots, keyed point reads | `SnapshotTable` re-keyed to `(sharedKey, uniqueKey)` — highest batch cost, zero LOH, wait-free readers |
 
 ### API gaps found (candidate follow-ups)
