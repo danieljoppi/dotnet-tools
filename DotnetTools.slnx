@@ -2,6 +2,9 @@
   <Folder Name="/benchmarks/">
     <Project Path="benchmarks/DotnetTools.SnapshotCache.Benchmarks/DotnetTools.SnapshotCache.Benchmarks.csproj" />
   </Folder>
+  <Folder Name="/samples/">
+    <Project Path="samples/Quickstart/Quickstart.csproj" />
+  </Folder>
   <Folder Name="/src/">
     <Project Path="src/DotnetTools.SnapshotCache/DotnetTools.SnapshotCache.csproj" />
   </Folder>

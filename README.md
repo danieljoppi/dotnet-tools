@@ -215,9 +215,18 @@ Not recommended, and not built here, deliberately:
 ```
 src/DotnetTools.SnapshotCache/           the library (net8.0;net10.0, zero dependencies)
 tests/DotnetTools.SnapshotCache.Tests/   xUnit: correctness, fuzz-vs-model, snapshot isolation,
-                                         concurrency stress, LOH + performance guardrails (80+ tests)
-benchmarks/DotnetTools.SnapshotCache.Benchmarks/   BenchmarkDotNet comparisons
+                                         concurrency stress, LOH + performance guardrails (110+ tests)
+benchmarks/DotnetTools.SnapshotCache.Benchmarks/   BenchmarkDotNet comparisons + LOH console studies
+samples/Quickstart/                      runnable end-to-end example of all three types
 ```
+
+Run the quickstart:
+
+```bash
+dotnet run --project samples/Quickstart
+```
+
+Changes are tracked in [`CHANGELOG.md`](CHANGELOG.md).
 
 ## Running tests and benchmarks
 
