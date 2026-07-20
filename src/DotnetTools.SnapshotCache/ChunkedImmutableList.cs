@@ -576,7 +576,7 @@ public sealed class ChunkedImmutableList<T> : IReadOnlyList<T>
                 var chunk = _blocks[b][s];
                 if (chunk.Length != tail)
                 {
-                    var trimmed = new T[tail];
+                    var trimmed = AllocateChunk(tail);
                     Array.Copy(chunk, trimmed, tail);
                     EnsureBlockOwned(b);
                     _blocks[b][s] = trimmed;
@@ -610,7 +610,7 @@ public sealed class ChunkedImmutableList<T> : IReadOnlyList<T>
                 // Clone at full chunk size: the shared source may be a trimmed tail chunk
                 // (published by ToImmutable), and an owned chunk must accept appends.
                 var source = block[s];
-                var copy = new T[1 << _shift];
+                var copy = AllocateChunk(1 << _shift);
                 Array.Copy(source, copy, source.Length);
                 block[s] = copy;
                 owned[s >> 6] |= 1UL << s;
@@ -643,7 +643,7 @@ public sealed class ChunkedImmutableList<T> : IReadOnlyList<T>
                     Array.Resize(ref _blocks[b], Math.Min(SpineBlockLength, _blocks[b].Length * 2));
                 }
             }
-            _blocks[b][s] = new T[1 << _shift];
+            _blocks[b][s] = AllocateChunk(1 << _shift);
             _chunkOwned[b]![s >> 6] |= 1UL << s;
             _chunkCount++;
         }
@@ -657,6 +657,18 @@ public sealed class ChunkedImmutableList<T> : IReadOnlyList<T>
                 _chunkOwned[b] = new ulong[SpineBlockOwnershipWords];
             }
         }
+
+        // Allocate a chunk array, skipping the CLR's zero-fill for reference-free element types.
+        // Safe because: on a clone/trim the copied region is overwritten immediately, and the
+        // tail slots of a not-yet-full chunk are always written by Add before they can be read
+        // (reads are Count-bounded, and ToImmutable trims the tail to the exact live count, so no
+        // uninitialized slot is ever published or observed). For element types that contain
+        // references the array MUST be zeroed, or the GC would trace a garbage pointer — the
+        // IsReferenceOrContainsReferences check is a JIT-time constant, so the branch folds away.
+        private static T[] AllocateChunk(int length) =>
+            RuntimeHelpers.IsReferenceOrContainsReferences<T>()
+                ? new T[length]
+                : GC.AllocateUninitializedArray<T>(length);
 
         /// <summary>Debugger proxy showing the builder's current elements.</summary>
         internal sealed class DebugView
