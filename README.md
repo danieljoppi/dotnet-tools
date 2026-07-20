@@ -72,10 +72,27 @@ references). Compared to `ImmutableArray`:
   most once. Untouched structure is shared between the old and new version (structural sharing),
   so old snapshots stay valid for free.
 - **Array-speed reads** — an index read is three array indexings, no tree traversal.
+- **Array-speed *scans* too** — `Chunks` exposes each chunk as a `ReadOnlySpan<T>`, so a full
+  scan runs as a handful of tight span loops (within ~3% of a contiguous `ImmutableArray`, vs the
+  element-by-element enumerator's ~10–25% premium).
 - **Adaptive chunk size** — `SnapshotTable` picks large (~64 KB) chunks for tables up to a few
   million rows (dense batches: fewer, larger copies win) and small (~4 KB) chunks for huge tables
   (sparse batches: 20k random updates over 100M rows copy ~65 MB instead of ~880 MB). Override
   with `SnapshotTableOptions.ChunkRows` / `EmptyWithChunkRows` if your batch pattern differs.
+
+Usable as a standalone persistent list, with an `ImmutableArray`-like surface:
+
+```csharp
+var list = ChunkedImmutableList<int>.CreateRange(source);   // or .EmptyWithChunkRows(n)
+var bigger = list.AddRange(moreItems);                        // O(touched chunks), shares the rest
+int at = list.IndexOf(value);                                // span scan, EqualityComparer.Default
+foreach (ReadOnlySpan<int> span in list.Chunks) { /* vectorize */ }
+list.CopyTo(destinationSpan);                                // chunk-sized block copies
+
+var builder = list.ToBuilder();                              // batch many edits, one publish
+builder.AddRange(batch);
+var next = builder.ToImmutable();                            // old `list` stays valid & unchanged
+```
 
 ### `SnapshotTable<TKey, TValue>`
 
