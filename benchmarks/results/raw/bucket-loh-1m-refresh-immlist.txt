@@ -1,0 +1,13 @@
+# Bucket LOH study: 1,000,000 entities, 2,000 shared keys, HeavyTailRefresh sizes, 10 warm batches, ~800 keys touched per batch
+Largest bucket: 30,000 entities (234 KB as a reference array); 15 bucket(s) past the 85 KB LOH threshold. GC: Workstation.
+
+| Approach | Heap after build | LOH after build | Batch p50 | Batch p95 | Batch max | Alloc/batch | Gen0/1/2 | LOH after cycles (uncompacted) | LOH after Gen2+compact | Gen2+compact pause | Heap growth (dropped) | Extra retained by held snapshot |
+|---|---:|---:|---:|---:|---:|---:|---|---:|---:|---:|---:|---:|
+| ImmArray_AddRange | 122.1 MiB | 3.4 MiB | 3.3 ms | 7.1 ms | 7.1 ms | 5.3 MiB | 0/0/0 | 9.4 MiB | 6.9 MiB | 243 ms | 13.7 MiB | 10.9 MiB |
+| List_Then_PublishArray | 129.9 MiB | 6.9 MiB | 4.6 ms | 10.4 ms | 10.4 ms | 6.8 MiB | 0/0/0 | 35.5 MiB | 13.7 MiB | 318 ms | 20.8 MiB | 10.9 MiB |
+| ImmList_Builder | 160.3 MiB | 0.0 MiB | 8.2 ms | 13.8 ms | 13.8 ms | 1.5 MiB | 0/0/0 | 0.0 MiB | 0.0 MiB | 370 ms | 17.6 MiB | 9.1 MiB |
+| ChunkedList_Builder | 122.4 MiB | 0.0 MiB | 5.5 ms | 8.1 ms | 8.1 ms | 7.0 MiB | 1/0/0 | 0.0 MiB | 0.0 MiB | 248 ms | 13.7 MiB | 11.2 MiB |
+| SnapshotTable_Rekeyed | 168.2 MiB | 0.0 MiB | 64.2 ms | 184.0 ms | 184.0 ms | 47.4 MiB | 7/6/1 | 0.0 MiB | 0.0 MiB | 274 ms | 18.8 MiB | 57.0 MiB |
+| MultiValue_Table | 122.2 MiB | 0.0 MiB | 2.0 ms | 23.5 ms | 23.5 ms | 3.7 MiB | 0/0/0 | 0.0 MiB | 0.0 MiB | 258 ms | 13.6 MiB | 11.0 MiB |
+
+Reading guide: 'LOH after cycles (uncompacted)' is what the process actually keeps resident between batches without a compacting Gen2 (which .NET does not run on its own unless pressured); the compacted column is the live large-object bytes. 'Extra retained' is the heap cost of pinning the pre-cycle snapshot through all batches.
