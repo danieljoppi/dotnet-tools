@@ -116,7 +116,7 @@ public class HybridIndexBucketTests
         table.ApplyChanges(null, Enumerable.Range(0, 2 * Promote).Select(i => (long)i));
 
         Assert.Empty(table.GetSnapshot().Lookup(byGroup, 5L));
-        Assert.Equal(0, table.Count);
+        Assert.Empty(table);
     }
 
     [Fact]

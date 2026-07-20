@@ -22,7 +22,7 @@ jobs:
         run: >
           dotnet test tests/DotnetTools.SnapshotCache.Tests -c Release --no-build
           --filter "Category!=Performance"
-          --logger "trx;LogFileName=unit-tests.trx"
+          --logger trx
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -47,7 +47,7 @@ jobs:
         run: >
           dotnet test tests/DotnetTools.SnapshotCache.Tests -c Release --no-build
           --filter "Category=Performance"
-          --logger "trx;LogFileName=performance-tests.trx"
+          --logger trx
       - uses: actions/upload-artifact@v4
         if: always()
         with:
