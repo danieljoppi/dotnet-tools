@@ -181,8 +181,13 @@ public sealed class SnapshotTable<TKey, TValue> : IReadOnlyCollection<KeyValuePa
     public TableSnapshot GetSnapshot() => Volatile.Read(ref _current);
 
     /// <summary>Registers a secondary index (index key → primary keys), maintained atomically with
-    /// every batch. Must be called before any rows are loaded. Suited to moderate-cardinality
-    /// attributes with buckets up to the low thousands of keys.</summary>
+    /// every batch. May be called on a populated table: the index is backfilled by a one-time
+    /// O(rows) scan of the current snapshot under the write lock, then published atomically —
+    /// existing rows never move, so this is a pure add. Suited to moderate-cardinality attributes
+    /// (buckets grow to chunked lists past ~1,024 keys, so large groups are supported).
+    /// <para>The returned handle can only be queried against snapshots taken after this call;
+    /// querying it on an older <see cref="TableSnapshot"/> (one captured before the index existed)
+    /// throws, since that snapshot predates the index.</para></summary>
     public TableIndex<TKey, TValue, TIndexKey> CreateIndex<TIndexKey>(
         Func<TKey, TValue, TIndexKey> selector,
         IEqualityComparer<TIndexKey>? comparer = null,
@@ -196,20 +201,27 @@ public sealed class SnapshotTable<TKey, TValue> : IReadOnlyCollection<KeyValuePa
         }
         lock (_writeLock)
         {
-            if (_current.Count > 0)
-            {
-                throw new InvalidOperationException("Secondary indexes must be registered before rows are loaded.");
-            }
+            var snapshot = _current;
             var definition = new TableIndex<TKey, TValue, TIndexKey>(
-                _indexFactories.Count, selector, comparer ?? EqualityComparer<TIndexKey>.Default);
+                snapshot.Indexes.Length, selector, comparer ?? EqualityComparer<TIndexKey>.Default);
             _indexFactories.Add(() => new IndexState<TKey, TValue, TIndexKey>(definition, shardCount));
-            var indexes = new IndexState<TKey, TValue>[_indexFactories.Count];
-            for (int i = 0; i < indexes.Length; i++)
+
+            // Build the new index from the existing rows (one-time O(rows) scan). Every other
+            // index is already built and carried over unchanged.
+            var newIndex = new IndexState<TKey, TValue, TIndexKey>(definition, shardCount);
+            var writer = newIndex.CreateWriter();
+            foreach (var (key, value) in snapshot.Rows)
             {
-                indexes[i] = _indexFactories[i]();
+                newIndex.Apply(writer, key, hadOld: false, oldValue: default, hasNew: true, newValue: value);
             }
+            var backfilled = newIndex.Freeze(writer);
+
+            var indexes = new IndexState<TKey, TValue>[snapshot.Indexes.Length + 1];
+            Array.Copy(snapshot.Indexes, indexes, snapshot.Indexes.Length);
+            indexes[^1] = backfilled;
+
             Volatile.Write(ref _current,
-                new TableSnapshot(this, _current.Rows, _current.Directory, indexes, _current.Version + 1));
+                new TableSnapshot(this, snapshot.Rows, snapshot.Directory, indexes, snapshot.Version + 1));
             return definition;
         }
     }
@@ -702,6 +714,11 @@ public sealed class SnapshotTable<TKey, TValue> : IReadOnlyCollection<KeyValuePa
             where TIndexKey : notnull
         {
             ArgumentNullException.ThrowIfNull(index);
+            if ((uint)index.Ordinal >= (uint)Indexes.Length)
+            {
+                throw new InvalidOperationException(
+                    "This index was created after the snapshot was captured; query it on a newer snapshot.");
+            }
             return ((IndexState<TKey, TValue, TIndexKey>)Indexes[index.Ordinal]).Lookup(indexKey);
         }
 

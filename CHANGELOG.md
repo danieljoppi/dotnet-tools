@@ -21,6 +21,10 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   members, so `SnapshotTable` + a group index scales to 100k+ member groups with zero LOH growth.
 - **`SnapshotChanged` delivered outside the write lock** (ordered drain), plus `TryRemove(out value)`
   and a strictly increasing snapshot `Version`.
+- **`CreateIndex` on a populated table** — a secondary index may now be registered after rows are
+  loaded; it is backfilled by a one-time O(rows) scan and published atomically (existing rows never
+  move). The handle is queryable only on snapshots taken after the call. Replaces the previous
+  "must register before load" restriction.
 - **`SnapshotTable.ResetParallel`**, public `EmptyWithTargetBytes` chunk sizing.
 - Benchmark coverage for shared-key buckets, large refreshes, bucket reads, and a `--bucket-loh`
   LOH/endurance console study (p50/p95, workstation + Server GC); charts and results in

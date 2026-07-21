@@ -162,11 +162,65 @@ public class SecondaryIndexTests
     }
 
     [Fact]
-    public void Index_MustBeRegisteredBeforeRows()
+    public void Index_CreatedAfterLoad_BackfillsFromExistingRows()
+    {
+        var table = new SnapshotTable<long, Customer>();
+        table.Reset(Enumerable.Range(0, 200).Select(i =>
+            KeyValuePair.Create((long)i, new Customer($"c{i}", i % 2 == 0 ? "BR" : "US", i))));
+
+        // Register the index on the already-populated table: it must be backfilled.
+        var byRegion = table.CreateIndex((_, c) => c.Region);
+
+        var snapshot = table.GetSnapshot();
+        for (var region = 0; region < 2; region++)
+        {
+            string r = region == 0 ? "BR" : "US";
+            var indexed = snapshot.Lookup(byRegion, r).Order().ToArray();
+            var scanned = snapshot.Where(kv => kv.Value.Region == r).Select(kv => kv.Key).Order().ToArray();
+            Assert.Equal(scanned, indexed);
+        }
+
+        // And it stays maintained by subsequent batches, exactly like a pre-registered index.
+        table.ApplyChanges([KeyValuePair.Create(0L, new Customer("moved", "US", 0))], [1L]);
+        var after = table.GetSnapshot();
+        Assert.Contains(0L, after.Lookup(byRegion, "US"));
+        Assert.DoesNotContain(0L, after.Lookup(byRegion, "BR"));
+        Assert.DoesNotContain(1L, after.Lookup(byRegion, "US"));
+    }
+
+    [Fact]
+    public void Index_CreatedAfterLoad_MatchesOneCreatedBeforeLoad()
+    {
+        var rows = Enumerable.Range(0, 500)
+            .Select(i => KeyValuePair.Create((long)i, new Customer($"c{i}", $"R{i % 7}", i)))
+            .ToArray();
+
+        var eager = new SnapshotTable<long, Customer>();
+        var eagerIndex = eager.CreateIndex((_, c) => c.Region);
+        eager.Reset(rows);
+
+        var lazy = new SnapshotTable<long, Customer>();
+        lazy.Reset(rows);
+        var lazyIndex = lazy.CreateIndex((_, c) => c.Region);
+
+        var es = eager.GetSnapshot();
+        var ls = lazy.GetSnapshot();
+        for (var r = 0; r < 7; r++)
+        {
+            Assert.Equal(es.Lookup(eagerIndex, $"R{r}").Order(), ls.Lookup(lazyIndex, $"R{r}").Order());
+        }
+    }
+
+    [Fact]
+    public void Index_QueriedOnOlderSnapshot_Throws()
     {
         var table = new SnapshotTable<long, Customer>();
         table.Upsert(1, new Customer("a", "BR", 1));
-        Assert.Throws<InvalidOperationException>(() => table.CreateIndex((_, c) => c.Region));
+        var stale = table.GetSnapshot();          // captured before the index exists
+        var byRegion = table.CreateIndex((_, c) => c.Region);
+
+        Assert.Throws<InvalidOperationException>(() => stale.Lookup(byRegion, "BR"));
+        Assert.Equal([1L], table.GetSnapshot().Lookup(byRegion, "BR")); // newer snapshot is fine
     }
 
     [Fact]
