@@ -13,6 +13,7 @@ in [`benchmarks/RESULTS.md`](../../benchmarks/RESULTS.md), raw outputs in
 | [0004](0004-secondary-indexes-as-cow-array-buckets.md) | Secondary indexes as copy-on-write hybrid buckets | Accepted (amended: chunked past 1,024 elements, #9) |
 | [0005](0005-measurement-policy-loh-memory-reads.md) | Measurement policy: LOH + overall memory always, read performance first-class | Accepted |
 | [0006](0006-shared-key-buckets-hybrid-representation.md) | Shared-key one-to-many buckets: hybrid array/chunked representation | Accepted (`MultiValueSnapshotTable`, #8) |
+| [0007](0007-multivalue-cold-load-and-input-allocation.md) | `MultiValueSnapshotTable` production validation: `Reset` cold-load, lean input, no parallel loader | Accepted (#43/#45/#46) |
 
 Adding a new ADR: copy the section structure of an existing one, number sequentially, add a row
 here, and link the measurements that justify the decision.

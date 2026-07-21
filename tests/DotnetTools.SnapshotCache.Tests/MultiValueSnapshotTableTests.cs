@@ -391,4 +391,106 @@ public class MultiValueSnapshotTableTests
         table.Clear();
         Assert.Equal(0, table.KeyCount);
     }
+
+    // --- Single-entity Append overload (issue #45): stores the one entity inline with no backing
+    // array, the lean path for one-entity refreshes. ---
+
+    [Fact]
+    public void SingleEntityAppend_MatchesArrayAppend_IncludingThroughPromotion()
+    {
+        // Append single entities one at a time — via the inline overload — from empty, through the
+        // array→chunked promotion boundary, and past it. Must match a plain list model exactly.
+        var model = new List<string>();
+        var table = new MultiValueSnapshotTable<long, string>();
+        for (int i = 0; i < Promote + 50; i++)
+        {
+            model.Add($"e{i}");
+            table.ApplyChanges([BucketChange.Append(1L, $"e{i}")]); // single-entity overload
+        }
+        Assert.Equal(model, table.Lookup(1L));
+
+        // Same key, single-entity appends folded with an array append in one batch.
+        table.ApplyChanges([BucketChange.Append(1L, "solo"), BucketChange.Append(1L, "arr1", "arr2")]);
+        model.AddRange(["solo", "arr1", "arr2"]);
+        Assert.Equal(model, table.Lookup(1L));
+    }
+
+    [Fact]
+    [Trait("Category", "Performance")]
+    public void SingleEntityAppend_AllocatesNoPerChangeArray()
+    {
+        // #45's target: building a batch of one-entity appends must not allocate a backing array
+        // per change. Compare the inline overload against wrapping each entity in a one-element
+        // array; the array form allocates one small array per change on top of the batch array,
+        // so it must allocate strictly (and substantially) more for identical content.
+        const int m = 5_000;
+        var values = Enumerable.Range(0, m).Select(i => $"v{i}").ToArray();
+
+        long BuildInline()
+        {
+            long before = GC.GetAllocatedBytesForCurrentThread();
+            var batch = new BucketChange<long, string>[m];
+            for (int i = 0; i < m; i++)
+            {
+                batch[i] = BucketChange.Append((long)i, values[i]); // inline, no array
+            }
+            GC.KeepAlive(batch);
+            return GC.GetAllocatedBytesForCurrentThread() - before;
+        }
+
+        long BuildArrayWrapped()
+        {
+            long before = GC.GetAllocatedBytesForCurrentThread();
+            var batch = new BucketChange<long, string>[m];
+            for (int i = 0; i < m; i++)
+            {
+                batch[i] = BucketChange.Append((long)i, new[] { values[i] }); // one array per change
+            }
+            GC.KeepAlive(batch);
+            return GC.GetAllocatedBytesForCurrentThread() - before;
+        }
+
+        BuildInline();       // warm up JIT
+        BuildArrayWrapped();
+
+        long inline = BuildInline();
+        long wrapped = BuildArrayWrapped();
+
+        Assert.True(inline < wrapped,
+            $"Inline single-entity batch allocated {inline} bytes vs array-wrapped {wrapped}; the " +
+            "inline overload must not allocate a per-change array.");
+    }
+
+    // --- Read-path guardrail (issue #46). ---
+
+    [Fact]
+    [Trait("Category", "Performance")]
+    public void Lookup_IsAllocationFree_ForArrayAndPromotedBuckets()
+    {
+        // The #46 read-path guardrail, deterministic form: Lookup + indexing must not allocate,
+        // whether the bucket is a flat array or a promoted ChunkedImmutableList. (Wall-clock bands
+        // vs ImmutableArray live in BucketReadBenchmarks, reported not asserted — CI timing is too
+        // noisy to gate, per ADR-0005.)
+        var table = new MultiValueSnapshotTable<long, long>(keyCapacityHint: 8);
+        table.Reset(
+        [
+            KeyValuePair.Create(1L, (IReadOnlyList<long>)Enumerable.Range(0, 4).Select(i => (long)i).ToArray()),
+            KeyValuePair.Create(2L, (IReadOnlyList<long>)Enumerable.Range(0, Promote + 500).Select(i => (long)i).ToArray()),
+        ]);
+        var snapshot = table.GetSnapshot();
+        // Warm up any one-time lazy allocation.
+        _ = snapshot.Lookup(1L)[0];
+        _ = snapshot.Lookup(2L)[Promote];
+
+        long before = GC.GetAllocatedBytesForCurrentThread();
+        long sum = 0;
+        for (int i = 0; i < 50_000; i++)
+        {
+            sum += snapshot.Lookup(1L)[i % 4];          // flat-array bucket
+            sum += snapshot.Lookup(2L)[i % (Promote + 500)]; // promoted chunked bucket
+        }
+        long allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+
+        Assert.True(allocated == 0, $"100k bucket lookups+indexing allocated {allocated} bytes; expected 0. (sum={sum})");
+    }
 }

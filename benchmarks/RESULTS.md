@@ -28,6 +28,8 @@ The suite models the real workload — a large table in memory, refreshed in bat
 | Shared-key one-to-many buckets (§9) | 1M entities over 10k / 100k shared keys, uniform + Zipf | `SharedKeyBucketBenchmarks` |
 | Bucket read path (§9) | 10k hot-weighted indexed reads + full 1M-entity scans | `BucketReadBenchmarks` |
 | Single large refresh over skewed buckets (§10) | ~12k entity ops across 800 of 2,000 keys, 15 LOH-sized buckets | `LargeRefreshBenchmarks` |
+| Cold-load footgun (§16) | 10k / 100k / 1M keys: per-key loop (O(N²)) vs one batch vs `Reset` | `ColdLoadBenchmarks` |
+| Lean batch input (§17) | 100k one-entity appends: inline vs array-wrapped vs lazy-streamed `BucketChange` | `BucketChangeInputBenchmarks` |
 
 Row type for the batch scenario: `record Row(long Id, string Name, decimal Balance, DateTime UpdatedAt)`
 keyed by `long`. Read/load scenarios use `long → long` to isolate structure cost from row size.
@@ -810,6 +812,57 @@ batched `ApplyChanges` sit in the same O(N) band.
 > failure was "never Ready," not "2% slower," so a boolean CI gate, not only a BenchmarkDotNet
 > trend, guards it.
 
+## 17. Lean batch input: single-entity `Append` + lazy streaming (issue #45)
+
+The largest ON-heap LOH adder after the O(N²) fix (§16) was the batch **input** on the
+incremental-refresh path — not an internal artifact. `ApplyChanges` only `foreach`es its argument,
+so the LOH came from (a) the per-change one-element `TEntity[]` that `Append(key, new[]{entity})`
+allocated, and (b) the `BucketChange[]` the caller materialized. Both are now avoidable: a
+single-entity `Append(key, entity)` overload holds the entity inline, and changes can be streamed
+as a lazy `IEnumerable` instead of an array.
+
+`BucketChangeInputBenchmarks`, 100k keys each receiving one appended entity, ShortRun (timing noisy
+at ~30 ms — allocation is the signal):
+
+| Input shape | Allocated | Alloc ratio |
+|---|---:|---:|
+| Array-wrapped, materialized `BucketChange[]` (pre-#45) | 14.21 MB | 1.27 |
+| Inline `Append(key, entity)`, materialized `BucketChange[]` | 11.16 MB | 1.00 (baseline) |
+| Inline `Append`, **lazy stream** (no batch array) | 7.34 MB | **0.66** |
+
+The inline overload removes the ~3 MB of per-change one-element arrays (100k × ~32 B); streaming
+removes the ~4 MB `BucketChange[]` itself (100k × ~40 B). Combined, the leanest input allocates
+**48% less** than the pre-#45 array-wrapped batch, and none of it lands on the LOH. A
+`Category=Performance` test (`SingleEntityAppend_AllocatesNoPerChangeArray`) gates the per-change
+saving. Raw:
+[`BucketChangeInputBenchmarks-report-github.md`](results/raw/DotnetTools.SnapshotCache.Benchmarks.BucketChangeInputBenchmarks-report-github.md).
+
+**Guidance:** for one-entity appends use `BucketChange.Append(key, entity)`; feed `ApplyChanges` a
+lazy `keys.Select(...)` rather than a materialized `BucketChange[]`.
+
+## 18. `MultiValueSnapshotTable` parallel cold load — measured, not shipped (issue #46)
+
+A parallel `ResetParallel` was implemented and measured against sequential `Reset`: group the input
+by shard (one reference per bucket, so O(keys) transient — better than the unique-key loader's
+O(entities) walk in #24), then materialize each shard's buckets on its own core. It **lost** on
+every profile. 1M entities over 10k buckets, ShortRun (4 physical cores):
+
+| Profile | `Reset` (sequential) | `ResetParallel` (4 cores) | Result |
+|---|---:|---:|---|
+| Uniform | 2.30 ms / 8.48 MB | 2.74 ms / 8.66 MB | **1.19× slower** |
+| Zipf | 2.14 ms / 8.96 MB | 2.97 ms / 9.14 MB | **1.39× slower** (high variance) |
+
+Bucket cold load is **memory-bandwidth-bound** — `MaterializeBucket` is cheap array/chunk copies
+over a shared bus — so extra cores contend instead of helping, and the shard-grouping pass adds
+overhead. Under Zipf a single dominant bucket (~100k entities) cannot be split across workers, so it
+serializes one core while the rest idle. This mirrors #24's unique-key finding. Per ADR-0005 (don't
+ship unproven perf changes), `ResetParallel` was **reverted**; sequential `Reset` is the cold-load
+path. The shipped part of #46 is a deterministic `Lookup` read-path guardrail
+(`Lookup_IsAllocationFree_ForArrayAndPromotedBuckets`, `Category=Performance`): bucket lookup +
+indexing allocates zero bytes for both flat-array and promoted chunked buckets. Wall-clock read
+comparisons vs `ImmutableArray` remain in §9 (`BucketReadBenchmarks`, reported not asserted — CI
+timing is too noisy to gate).
+
 ## Reproducing
 
 ```bash
@@ -835,4 +888,7 @@ dotnet run -c Release --project benchmarks/DotnetTools.SnapshotCache.Benchmarks 
 dotnet run -c Release --project benchmarks/DotnetTools.SnapshotCache.Benchmarks -- --bucket-loh 1000000 10000 zipf 10
 dotnet run -c Release --project benchmarks/DotnetTools.SnapshotCache.Benchmarks -- --bucket-loh 10000000 10000 zipf 10
 dotnet run -c Release --project benchmarks/DotnetTools.SnapshotCache.Benchmarks -- --bucket-loh 1000000 2000 refresh 10
+
+# lean batch input (§17): inline vs array-wrapped vs lazy-streamed BucketChange
+dotnet run -c Release --project benchmarks/DotnetTools.SnapshotCache.Benchmarks -- --filter '*BucketChangeInput*' --job short --memory
 ```
