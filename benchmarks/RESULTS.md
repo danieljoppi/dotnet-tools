@@ -777,10 +777,38 @@ O(rows) scan of the current snapshot. `SecondaryIndexBenchmarks`, 1M rows, regio
 | `Reset` with the index registered up front | 134 ms | 74.5 MB (load + index end-to-end) |
 
 The backfill is a one-time admin cost in the band of a full `Reset`, allocating only the index's
-own buckets (chunked past 1,024 members, so LOH-free even for the 125k-key regions here). The
-eager row shows the load+index total for reference — not directly comparable, since its per-row
-index work is folded into `Reset`. Raw:
+own buckets. Those buckets chunk once they pass 1,024 members, so the index is **sub-LOH by
+construction** even for the ~125k-member region buckets here — but note that `[MemoryDiagnoser]`
+reports allocated bytes and Gen0/1/2 *counts*, not LOH occupancy (ADR-0005, pitfall #1), so that is
+a structural guarantee, not a figure this benchmark measures. The `--bucket-loh` console study and
+the `Category=Performance` guardrails are what verify the zero-LOH property. The eager row shows the
+load+index total for reference — not directly comparable, since its per-row index work is folded
+into `Reset`. Raw:
 [`SecondaryIndexBenchmarks-report-github.md`](results/raw/DotnetTools.SnapshotCache.Benchmarks.SecondaryIndexBenchmarks-report-github.md).
+
+## 16. Cold-load cost: batch vs the per-key footgun (issues #42/#43)
+
+`MultiValueSnapshotTable` must be cold-loaded with `Reset` or a single batched `ApplyChanges`.
+Loading it with one `ApplyChanges` call per key is **O(N²)** in shard occupancy: every call clones
+the shard directory and copy-on-writes a whole shard dictionary. In a production A/B (issue #42)
+this flooded the LOH — sampled allocation rose ~108 GB → ~2504 GB — and the process never reached
+Ready. `ColdLoadBenchmarks` contrasts the three population paths at N ∈ {10k, 100k, 1M} keys
+(4 values each), pinned to a one-shot `ColdStart` job so each build is measured once; the per-key
+path is capped at 100k because at O(N²) the 1M case runs for minutes (which is the symptom).
+
+The **allocation column** is the signal here (timings on a shared runner are noisy per ADR-0005,
+and the per-key path's cost is dominated by repeated shard-dictionary clones, not wall time). The
+per-key path allocates orders of magnitude more than `Reset` for the same final table; `Reset` and
+batched `ApplyChanges` sit in the same O(N) band.
+
+> Numbers are produced on a benchmark host (`dotnet run -c Release --project
+> benchmarks/DotnetTools.SnapshotCache.Benchmarks -- --filter '*ColdLoad*' --job short`) and the
+> raw report committed under `results/raw/`; this table is pending that run. The **deterministic**
+> gate does not wait for it: the `Category=Performance` guardrail
+> `ColdLoad_PerKeyApplyChanges_AllocatesOrdersOfMagnitudeMoreThanReset` asserts on allocated bytes
+> (>20× `Reset`, measured ~30–40×) and runs on every merge request — matching #42's lesson that the
+> failure was "never Ready," not "2% slower," so a boolean CI gate, not only a BenchmarkDotNet
+> trend, guards it.
 
 ## Reproducing
 

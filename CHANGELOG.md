@@ -29,6 +29,12 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Benchmark coverage for shared-key buckets, large refreshes, bucket reads, and a `--bucket-loh`
   LOH/endurance console study (p50/p95, workstation + Server GC); charts and results in
   `benchmarks/RESULTS.md`.
+- **Cold-load footgun guardrail for `MultiValueSnapshotTable` (issue #43)** — `ApplyChanges`/`Reset`
+  XML docs now spell out that a batch costs O(touched shard occupancy), not O(1) per key, and that
+  cold load must use `Reset` (or one batched `ApplyChanges`), never a per-key `ApplyChanges` loop
+  (which is O(N²) — the production "never Ready" failure in issue #42). A `Category=Performance`
+  test asserts the per-key path allocates >20× `Reset`, and `ColdLoadBenchmarks` measures all three
+  population paths across N ∈ {10k, 100k, 1M}. README and `RESULTS.md §16` updated.
 
 ### Changed
 

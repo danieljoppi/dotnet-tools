@@ -137,6 +137,19 @@ public sealed class MultiValueSnapshotTable<TKey, TEntity>
     /// Successive <c>Append</c>/<c>ReplaceAt</c> changes to the same promoted (chunked) key fold
     /// into one builder published once at the end of the batch — mirroring the secondary index's
     /// per-batch builder cache (issue #31) — so N changes to a hot key cost one spine copy, not N.</summary>
+    /// <remarks>
+    /// <para><b>Cost is O(the total occupancy of the shards this batch touches), paid once per
+    /// batch — not O(1) per key.</b> Each call clones the shard directory and copy-on-writes every
+    /// shard dictionary it touches, then publishes a single snapshot. Amortized over a well-sized
+    /// batch that is cheap; paid once per key it is not.</para>
+    /// <para><b>Never cold-load by calling this once per key.</b> A loop of single-change
+    /// <see cref="ApplyChanges"/> calls re-clones a touched shard dictionary on every call, so
+    /// loading N keys is O(N²) in shard occupancy and floods the Large Object Heap with dead shard
+    /// arrays — the footgun that kept a production process unhealthy for 15+ minutes (issue #42).
+    /// To load a whole table, group entities by key and call <see cref="Reset"/>, or pass the
+    /// entire cold load to this method as one batch. Per-entity calls are fine only for small
+    /// incremental refreshes.</para>
+    /// </remarks>
     public void ApplyChanges(IEnumerable<BucketChange<TKey, TEntity>> changes)
     {
         ArgumentNullException.ThrowIfNull(changes);
@@ -286,6 +299,11 @@ public sealed class MultiValueSnapshotTable<TKey, TEntity>
     }
 
     /// <summary>Atomically replaces the entire table content.</summary>
+    /// <remarks>The one-shot cold-load path: builds every shard once in O(total entities) with no
+    /// per-key copy-on-write, and never touches the Large Object Heap. Prefer this — or a single
+    /// batched <see cref="ApplyChanges"/> — over a per-key <see cref="ApplyChanges"/> loop when
+    /// loading a whole table; see the remarks on <see cref="ApplyChanges"/> for why the loop is
+    /// O(N²).</remarks>
     public void Reset(IEnumerable<KeyValuePair<TKey, IReadOnlyList<TEntity>>> buckets)
     {
         ArgumentNullException.ThrowIfNull(buckets);

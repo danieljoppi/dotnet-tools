@@ -49,7 +49,9 @@ the run.
 lists past the 85 KB LOH threshold" shape, `ChunkedImmutableList` and the packaged
 `MultiValueSnapshotTable` hold **0 MiB LOH growth** over 100 warm batches, where
 `ImmutableArray.AddRange` and `List → publish-array` leave **hundreds of MiB to gigabytes** of dead
-large objects (details in [`benchmarks/RESULTS.md` §9–§13](benchmarks/RESULTS.md)):
+large objects (details in [`benchmarks/RESULTS.md` §9–§13](benchmarks/RESULTS.md)). One caveat for
+`MultiValueSnapshotTable`: cold-load the table with `Reset` or a single batched `ApplyChanges`, never
+a per-key `ApplyChanges` loop (that path is O(N²) — see the type's section below):
 
 ![Shared-key bucket LOH growth](benchmarks/results/charts/bucket-loh-growth.png)
 
@@ -166,6 +168,14 @@ byInstrument.ApplyChanges([                                 // atomic batch of b
 
 IReadOnlyList<Order> book = byInstrument.Lookup(instrumentId);  // wait-free, immutable
 ```
+
+> **Cold-load batching is mandatory.** Populate the table with `Reset` (or one batched
+> `ApplyChanges`), **never** a loop of one `ApplyChanges` call per key. Each `ApplyChanges` clones
+> the shard directory and copy-on-writes every touched shard dictionary once, so a per-key loop is
+> **O(N²)** in shard occupancy — the footgun that kept a production service unhealthy for 15+
+> minutes ([issue #42](https://github.com/danieljoppi/dotnet-tools/issues/42)). Per-entity calls
+> are fine only for small incremental refreshes. Guarded in CI by the `Category=Performance`
+> cold-load test; measured across N in `ColdLoadBenchmarks` ([`RESULTS.md` §16](benchmarks/RESULTS.md)).
 
 Install from the packaged build (`dotnet pack src/DotnetTools.SnapshotCache`; CI uploads the
 `.nupkg` as an artifact on every merge request, and pushing a `v*` tag publishes a GitHub Release —
