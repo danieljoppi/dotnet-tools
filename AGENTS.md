@@ -124,6 +124,17 @@ Three axes, in this order of non-negotiability, all three always:
   with the lowest alloc/batch, but the worst LOH-safe reads and +30% resident heap; bench-only,
   not adopted in the API). Open: #11's remainder (index-writer bookkeeping, chunk scatter),
   #12 (bench follow-ups: Server GC + p95 study, timing precision, charts).
+- Issue #42 (**production validation** of `MultiValueSnapshotTable` — see ADR-0007, RESULTS.md
+  §16–§18): #43 **done** (P0 — cold-load by a per-key `ApplyChanges` loop is O(N²) and kept a prod
+  process from ever reaching Ready; `Reset` is the O(N) cold-load path, enforced by
+  `ColdLoadFootgunTests`). #45 **done** (lean input — inline single-entity `BucketChange.Append`
+  + lazy `IEnumerable` streaming, ~48% less alloc, no LOH). #46 **done** (a `Lookup` zero-alloc
+  gate shipped; `ResetParallel` was measured 1.19–1.39× *slower* than `Reset` — memory-bandwidth
+  bound, mirrors #24 — and reverted). **Open: #44** (make the 1,024 promotion threshold
+  byte-aware; blocked on entity-size + bucket-size distribution data).
+- **Cold-load rule** (from #42/#43): to populate or fully refresh a `MultiValueSnapshotTable`, call
+  `Reset` (or one batched `ApplyChanges`), never a per-key loop — the loop is quadratic. Treat this
+  as a usage invariant when writing examples, samples, or docs.
 - Bucket *read* performance (chunked indexing/enumeration vs contiguous arrays) is measured in
   `BucketReadBenchmarks` — keep it in the loop whenever bucket representations change, and use it
   before tightening the §9 recommendation thresholds.

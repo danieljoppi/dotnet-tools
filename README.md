@@ -177,6 +177,12 @@ IReadOnlyList<Order> book = byInstrument.Lookup(instrumentId);  // wait-free, im
 > are fine only for small incremental refreshes. Guarded in CI by the `Category=Performance`
 > cold-load test; measured across N in `ColdLoadBenchmarks` ([`RESULTS.md` §16](benchmarks/RESULTS.md)).
 
+> **Keep refresh input lean.** For the incremental refreshes themselves, stream changes as a lazy
+> `IEnumerable` (`keys.Select(k => BucketChange.Append(k, entity))`) rather than a materialized
+> `BucketChange[]`, and use the single-entity `BucketChange.Append(key, entity)` overload — it holds
+> the entity inline instead of allocating a one-element array per change
+> ([`RESULTS.md` §17](benchmarks/RESULTS.md), issue #45).
+
 Install from the packaged build (`dotnet pack src/DotnetTools.SnapshotCache`; CI uploads the
 `.nupkg` as an artifact on every merge request, and pushing a `v*` tag publishes a GitHub Release —
 see [`.github/workflows/release.yml`](.github/workflows/release.yml)).

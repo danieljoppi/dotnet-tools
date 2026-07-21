@@ -1,5 +1,6 @@
 using System.Numerics;
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 
 namespace DotnetTools.SnapshotCache;
 
@@ -11,6 +12,14 @@ public static class BucketChange
     public static BucketChange<TKey, TEntity> Append<TKey, TEntity>(TKey key, params TEntity[] entities)
         where TKey : notnull =>
         new(BucketChangeKind.Append, key, entities, null);
+
+    /// <summary>Appends a <b>single</b> entity to <paramref name="key"/>'s bucket without allocating
+    /// a backing array — the lean path for the common one-entity refresh (issue #45). Prefer this
+    /// over <c>Append(key, new[] { entity })</c>: at scale, per-change one-element arrays were the
+    /// largest LOH adder on the incremental-refresh path.</summary>
+    public static BucketChange<TKey, TEntity> Append<TKey, TEntity>(TKey key, TEntity entity)
+        where TKey : notnull =>
+        new(BucketChangeKind.Append, key, entity);
 
     /// <summary>Replaces the entities at the given bucket positions of an existing key.</summary>
     public static BucketChange<TKey, TEntity> ReplaceAt<TKey, TEntity>(TKey key, params (int Index, TEntity Value)[] replacements)
@@ -41,9 +50,14 @@ public readonly struct BucketChange<TKey, TEntity>
     where TKey : notnull
 {
     internal readonly BucketChangeKind Kind;
+    // A single-entity Append (issue #45) stores its one entity inline in SingleEntity with no
+    // backing array; HasSingleEntity selects that path. The bool packs into Kind's alignment slot,
+    // so the only size cost is the SingleEntity field. Set only for Append.
+    internal readonly bool HasSingleEntity;
     internal readonly TKey Key;
     internal readonly TEntity[]? Entities;
     internal readonly (int Index, TEntity Value)[]? Replacements;
+    internal readonly TEntity? SingleEntity;
 
     internal BucketChange(BucketChangeKind kind, TKey key, TEntity[]? entities, (int, TEntity)[]? replacements)
     {
@@ -52,6 +66,25 @@ public readonly struct BucketChange<TKey, TEntity>
         Entities = entities;
         Replacements = replacements;
     }
+
+    // Single-entity Append: the entity is held inline, no array allocated.
+    internal BucketChange(BucketChangeKind kind, TKey key, TEntity entity)
+    {
+        Kind = kind;
+        Key = key;
+        HasSingleEntity = true;
+        SingleEntity = entity;
+    }
+
+    /// <summary>The entities this Append adds, as a span over either the inline single entity or the
+    /// backing array — no allocation either way. Valid only while this change is on the stack.</summary>
+    internal ReadOnlySpan<TEntity> AppendEntities =>
+        HasSingleEntity
+            // SingleEntity is TEntity? (the array ctor leaves it default); reinterpret the ref as
+            // non-nullable TEntity — identical runtime type — for a one-element span.
+            ? MemoryMarshal.CreateReadOnlySpan(
+                ref Unsafe.As<TEntity?, TEntity>(ref Unsafe.AsRef(in SingleEntity)), 1)
+            : Entities;
 }
 
 /// <summary>
@@ -149,6 +182,11 @@ public sealed class MultiValueSnapshotTable<TKey, TEntity>
     /// To load a whole table, group entities by key and call <see cref="Reset"/>, or pass the
     /// entire cold load to this method as one batch. Per-entity calls are fine only for small
     /// incremental refreshes.</para>
+    /// <para><b>Keep the batch input lean.</b> This method only <c>foreach</c>es
+    /// <paramref name="changes"/>, so a lazy <c>keys.Select(k =&gt; BucketChange.Append(k, entity))</c>
+    /// never allocates a <c>BucketChange[]</c> — at large batch sizes that array was itself a top LOH
+    /// contributor (issue #45). For single-entity appends prefer <c>BucketChange.Append(key, entity)</c>,
+    /// which holds the entity inline instead of allocating a one-element array per change.</para>
     /// </remarks>
     public void ApplyChanges(IEnumerable<BucketChange<TKey, TEntity>> changes)
     {
@@ -171,9 +209,12 @@ public sealed class MultiValueSnapshotTable<TKey, TEntity>
                 {
                     case BucketChangeKind.Append:
                     {
+                        // Entities to append: a span over the inline single entity (issue #45) or
+                        // the backing array — no allocation either way.
+                        var entities = change.AppendEntities;
                         if (building is not null && building.TryGetValue(change.Key, out var pending))
                         {
-                            pending.AddRange(change.Entities.AsSpan()); // O(chunk), no publish until batch end
+                            pending.AddRange(entities); // O(chunk), no publish until batch end
                             break;
                         }
                         shard.TryGetValue(change.Key, out var existing);
@@ -184,12 +225,11 @@ public sealed class MultiValueSnapshotTable<TKey, TEntity>
                         if (existing is ChunkedImmutableList<TEntity> chunked)
                         {
                             OpenBuilder(ref building, change.Key, chunked.ToBuilder())
-                                .AddRange(change.Entities.AsSpan());
+                                .AddRange(entities);
                         }
                         else
                         {
                             var bucket = existing as TEntity[] ?? EmptyBucket;
-                            var entities = change.Entities!;
                             if (bucket.Length + entities.Length > ArrayBucketMaxLength)
                             {
                                 // Promote: one final whole copy into sub-LOH chunks; O(chunk)
@@ -197,13 +237,13 @@ public sealed class MultiValueSnapshotTable<TKey, TEntity>
                                 var builder = OpenBuilder(ref building, change.Key,
                                     ChunkedImmutableList<TEntity>.Empty.ToBuilder());
                                 builder.AddRange(bucket.AsSpan());
-                                builder.AddRange(entities.AsSpan());
+                                builder.AddRange(entities);
                             }
                             else
                             {
                                 var grown = new TEntity[bucket.Length + entities.Length];
                                 Array.Copy(bucket, grown, bucket.Length);
-                                Array.Copy(entities, 0, grown, bucket.Length, entities.Length);
+                                entities.CopyTo(grown.AsSpan(bucket.Length));
                                 shard[change.Key] = grown;
                             }
                         }

@@ -35,6 +35,12 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (which is O(N²) — the production "never Ready" failure in issue #42). A `Category=Performance`
   test asserts the per-key path allocates >20× `Reset`, and `ColdLoadBenchmarks` measures all three
   population paths across N ∈ {10k, 100k, 1M}. README and `RESULTS.md §16` updated.
+- **Single-entity `BucketChange.Append(key, entity)`** — holds the one entity inline instead of
+  allocating a one-element `TEntity[]` per change, cutting the per-change allocation on the
+  incremental-refresh path. Combined with streaming changes as a lazy `IEnumerable` (rather than a
+  materialized `BucketChange[]`), the batch input no longer contributes to the LOH: array-wrapped
+  14.21 MB → inline 11.16 MB → lazy stream 7.34 MB at 100k one-entity appends (`RESULTS.md §17`,
+  issue #45).
 
 ### Changed
 
@@ -45,6 +51,14 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   instead of interface-dispatching, cutting the 10M rekeyed batch from ~220 ms to ~119 ms.
 - Reference-free chunk allocations skip the CLR zero-fill (`GC.AllocateUninitializedArray`); no
   allocation change, a small time saving that scales with data volume.
+
+### Documented
+
+- **Production validation of `MultiValueSnapshotTable` captured in ADR-0007** (issue #42): the
+  cold-load rule (#43), the lean-input decision (#45), and a measured negative result — a parallel
+  `ResetParallel` cold-loader was 1.19×–1.39× *slower* than sequential `Reset` (memory-bandwidth
+  bound) and was not shipped (#46). A `Lookup` zero-allocation guardrail covers the read path for
+  both flat-array and promoted chunked buckets. Benchmarks in RESULTS.md §16–§18.
 
 ### Fixed
 
