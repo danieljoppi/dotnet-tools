@@ -267,4 +267,90 @@ public class PerformanceTests
             }
         }
     }
+
+    // --- MultiValueSnapshotTable cold-load footgun (issues #42/#43). Loading a whole table with one
+    // ApplyChanges call per key is O(N^2) in shard occupancy: every call clones the shard directory
+    // and copy-on-writes a whole shard dictionary. In production this flooded the LOH and kept the
+    // process unhealthy for 15+ minutes. The correct cold-load path is Reset (or one batched
+    // ApplyChanges). This is the guardrail that must fail on the per-key loop and pass on the batch;
+    // it asserts on ALLOCATED BYTES (deterministic on CI), not wall time. ---
+
+    private const int ColdLoadKeys = 20_000;
+
+    private static IEnumerable<KeyValuePair<long, IReadOnlyList<long>>> ColdLoadBuckets() =>
+        Enumerable.Range(0, ColdLoadKeys)
+            .Select(i => new KeyValuePair<long, IReadOnlyList<long>>(i, new long[] { i }));
+
+    private static long MeasureAllocated(Action action)
+    {
+        long before = GC.GetAllocatedBytesForCurrentThread();
+        action();
+        return GC.GetAllocatedBytesForCurrentThread() - before;
+    }
+
+    private static void ColdLoadWithReset()
+    {
+        var table = new MultiValueSnapshotTable<long, long>(keyCapacityHint: ColdLoadKeys);
+        table.Reset(ColdLoadBuckets());
+        GC.KeepAlive(table);
+    }
+
+    private static void ColdLoadPerKeyApplyChanges(int keys)
+    {
+        var table = new MultiValueSnapshotTable<long, long>(keyCapacityHint: keys);
+        for (long k = 0; k < keys; k++)
+        {
+            table.ApplyChanges([BucketChange.Append(k, k)]);
+        }
+        GC.KeepAlive(table);
+    }
+
+    [Fact]
+    public void ColdLoad_PerKeyApplyChanges_AllocatesOrdersOfMagnitudeMoreThanReset()
+    {
+        // Warm up the JIT on both paths (throwaway tables) so first-call costs aren't attributed.
+        ColdLoadWithReset();
+        ColdLoadPerKeyApplyChanges(1_000);
+
+        long resetBytes = MeasureAllocated(ColdLoadWithReset);
+        long perKeyBytes = MeasureAllocated(() => ColdLoadPerKeyApplyChanges(ColdLoadKeys));
+
+        // The correct path is O(total entities): a shard directory, one entry per key, and a
+        // single-element bucket each. For 20k single-entity keys that is a few MB — assert it stays
+        // O(N), which also catches a regression toward O(N^2) on the recommended path itself.
+        Assert.True(resetBytes < 12_000_000,
+            $"Reset cold-load of {ColdLoadKeys} keys allocated {resetBytes / 1_048_576.0:F1} MiB; expected O(N).");
+
+        // The per-key loop re-clones a shard dictionary on every call. It must dwarf Reset by an
+        // order of magnitude; 20x is a conservative floor (measured ~30-40x) that stays stable on
+        // noisy runners. If this ever fails because the two are close, the O(N^2) copy-on-write was
+        // fixed upstream — revisit the API guidance and this guardrail together, don't just relax it.
+        Assert.True(perKeyBytes > resetBytes * 20,
+            $"Per-key cold-load allocated {perKeyBytes / 1_048_576.0:F1} MiB vs Reset " +
+            $"{resetBytes / 1_048_576.0:F1} MiB; expected the footgun to allocate >20x more.");
+    }
+
+    [Fact]
+    public void ColdLoad_BatchedApplyChanges_IsCheapLikeReset()
+    {
+        // The other correct cold-load path: hand the whole load to ApplyChanges as ONE batch. It
+        // must land in the same O(N) band as Reset, nowhere near the per-key loop.
+        var batch = Enumerable.Range(0, ColdLoadKeys)
+            .Select(i => BucketChange.Append((long)i, (long)i))
+            .ToArray();
+
+        // Warm-up.
+        new MultiValueSnapshotTable<long, long>(keyCapacityHint: ColdLoadKeys).ApplyChanges(batch);
+
+        long batchedBytes = MeasureAllocated(() =>
+        {
+            var table = new MultiValueSnapshotTable<long, long>(keyCapacityHint: ColdLoadKeys);
+            table.ApplyChanges(batch);
+            GC.KeepAlive(table);
+        });
+
+        Assert.True(batchedBytes < 12_000_000,
+            $"Batched cold-load of {ColdLoadKeys} keys allocated {batchedBytes / 1_048_576.0:F1} MiB; " +
+            "one batch must stay O(N), not O(N^2).");
+    }
 }
