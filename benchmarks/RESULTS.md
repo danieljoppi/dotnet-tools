@@ -765,6 +765,23 @@ ephemeral Gen0 garbage that never reaches the LOH. `ImmutableList` remains what 
 for unique keys: the zero-dependency fallback when you cannot take a library, priced in reads
 and resident memory.
 
+## 15. Secondary-index creation cost (backfill after load, issue #20)
+
+Registering a secondary index on an already-populated table backfills it with a one-time
+O(rows) scan of the current snapshot. `SecondaryIndexBenchmarks`, 1M rows, region attribute
+(8 distinct values):
+
+| Operation | Time | Allocated |
+|---|---:|---:|
+| `CreateIndex` backfill on a loaded table | 34 ms | **40 MB** (the index) |
+| `Reset` with the index registered up front | 134 ms | 74.5 MB (load + index end-to-end) |
+
+The backfill is a one-time admin cost in the band of a full `Reset`, allocating only the index's
+own buckets (chunked past 1,024 members, so LOH-free even for the 125k-key regions here). The
+eager row shows the load+index total for reference — not directly comparable, since its per-row
+index work is folded into `Reset`. Raw:
+[`SecondaryIndexBenchmarks-report-github.md`](results/raw/DotnetTools.SnapshotCache.Benchmarks.SecondaryIndexBenchmarks-report-github.md).
+
 ## Reproducing
 
 ```bash
