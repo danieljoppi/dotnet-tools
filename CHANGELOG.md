@@ -41,6 +41,14 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   materialized `BucketChange[]`), the batch input no longer contributes to the LOH: array-wrapped
   14.21 MB → inline 11.16 MB → lazy stream 7.34 MB at 100k one-entity appends (`RESULTS.md §17`,
   issue #45).
+- **Tunable flat-array promotion cap** — `MultiValueSnapshotTable`'s constructor takes
+  `maxArrayBucketElements` (default keeps the current 1,024-element behavior). Raising it keeps
+  larger buckets as compact flat arrays — fewer `ChunkedImmutableList` instances and less
+  per-instance retained overhead — at the cost of a larger whole-array copy per append in the
+  widened range. The value is a ceiling only: it is always floored by the byte-aware limit, so a
+  flat `TEntity[]` can never reach the LOH whatever you pass. The retained-heap lever for issue #44;
+  size it from your bucket-size distribution (the default stays safe/conservative for reference
+  entities).
 
 ### Changed
 
