@@ -75,4 +75,43 @@ public class ByteAwarePromotionTests
         table.ApplyChanges([BucketChange.Append(1L, "one-more")]);
         Assert.IsType<ChunkedImmutableList<string>>(table.Lookup(1L));
     }
+
+    // --- Operator-tunable ceiling (issue #44, retained-heap lever): raise the flat-array cap to
+    // keep larger buckets compact (fewer chunked instances), always floored by the byte limit. ---
+
+    [Fact]
+    public void RaisedCeiling_KeepsReferenceBucketFlatPastDefault()
+    {
+        var table = new MultiValueSnapshotTable<long, string>(maxArrayBucketElements: 8192);
+        Assert.Equal(8192, table.EffectiveArrayBucketMaxCount); // 8192 * 8 B = 64 KB, sub-LOH
+
+        table.ApplyChanges([BucketChange.Append(1L, Enumerable.Range(0, 8192).Select(i => $"e{i}").ToArray())]);
+        Assert.IsType<string[]>(table.Lookup(1L)); // still a flat array well past the 1,024 default
+
+        table.ApplyChanges([BucketChange.Append(1L, "one-more")]);
+        Assert.IsType<ChunkedImmutableList<string>>(table.Lookup(1L)); // promotes past the raised cap
+    }
+
+    [Fact]
+    public void RaisedCeiling_IsAlwaysFlooredByTheByteLimit()
+    {
+        // An absurd ceiling can never push a flat array onto the LOH — the byte floor wins.
+        Assert.Equal(10_500, // 84,000 / 8
+            new MultiValueSnapshotTable<long, string>(maxArrayBucketElements: 1_000_000).EffectiveArrayBucketMaxCount);
+        Assert.Equal(82, // 84,000 / 1,024, unchanged by the requested ceiling
+            new MultiValueSnapshotTable<long, Big1Kb>(maxArrayBucketElements: 1_000_000).EffectiveArrayBucketMaxCount);
+    }
+
+    [Fact]
+    public void DefaultCeiling_MatchesTheStaticDefault()
+    {
+        Assert.Equal(
+            MultiValueSnapshotTable<long, string>.ArrayBucketMaxCount,
+            new MultiValueSnapshotTable<long, string>().EffectiveArrayBucketMaxCount);
+    }
+
+    [Fact]
+    public void NegativeCeiling_Throws() =>
+        Assert.Throws<ArgumentOutOfRangeException>(
+            () => new MultiValueSnapshotTable<long, string>(maxArrayBucketElements: -1));
 }

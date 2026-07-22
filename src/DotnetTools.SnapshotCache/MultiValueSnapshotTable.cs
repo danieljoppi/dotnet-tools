@@ -112,15 +112,18 @@ public sealed class MultiValueSnapshotTable<TKey, TEntity>
     /// size (issue #44).</summary>
     private const int ArrayBucketMaxBytes = 84_000;
 
-    /// <summary>The effective promotion cap in elements: <see cref="ArrayBucketMaxLength"/>, but
-    /// lowered for wide entities so a flat <c>TEntity[]</c> never reaches the LOH. For reference
+    /// <summary>The <b>default</b> effective promotion cap in elements: <see cref="ArrayBucketMaxLength"/>,
+    /// but lowered for wide entities so a flat <c>TEntity[]</c> never reaches the LOH. For reference
     /// entities (8-byte slots) this is 1,024; for a struct larger than ~82 bytes it drops below
     /// 1,024 (e.g. a 1 KB struct promotes at ~82 elements, an ~82 KB array). Byte-awareness only
-    /// <i>tightens</i> the cap here — raising it for small elements to reclaim per-chunk overhead is
-    /// a separate, measured change (issue #44) that needs the production bucket-size distribution.
-    /// Computed once per closed generic type.</summary>
+    /// <i>tightens</i> the cap here; a table may <i>raise</i> the ceiling via the constructor's
+    /// <c>maxArrayBucketElements</c> (still floored by the byte limit) — the retained-heap lever for
+    /// issue #44. Computed once per closed generic type.</summary>
     internal static readonly int ArrayBucketMaxCount =
         Math.Min(ArrayBucketMaxLength, Math.Max(1, ArrayBucketMaxBytes / Unsafe.SizeOf<TEntity>()));
+
+    /// <summary>This instance's effective promotion cap (honors <c>maxArrayBucketElements</c>).</summary>
+    internal int EffectiveArrayBucketMaxCount => _arrayBucketMaxCount;
 
     private const int TargetKeysPerShard = 256;
     private const int MinShardCount = 8;
@@ -131,6 +134,10 @@ public sealed class MultiValueSnapshotTable<TKey, TEntity>
     private readonly IEqualityComparer<TKey> _comparer;
     private readonly bool _defaultComparer; // value-type TKey + default comparer → devirtualized hash
     private readonly int _shardShift;
+    // Per-instance effective promotion cap: the configured element ceiling, floored by the
+    // byte-aware limit so a flat TEntity[] can never reach the LOH (issue #44). Defaults to
+    // ArrayBucketMaxCount (ceiling = ArrayBucketMaxLength).
+    private readonly int _arrayBucketMaxCount;
     private readonly object _writeLock = new();
     private TableSnapshot _current;
 
@@ -142,9 +149,23 @@ public sealed class MultiValueSnapshotTable<TKey, TEntity>
 
     /// <param name="keyCapacityHint">Expected number of distinct shared keys; sizes the shard fan-out.</param>
     /// <param name="comparer">Key comparer; defaults to <see cref="EqualityComparer{TKey}.Default"/>.</param>
-    public MultiValueSnapshotTable(int keyCapacityHint = 0, IEqualityComparer<TKey>? comparer = null)
+    /// <param name="maxArrayBucketElements">
+    /// Element ceiling at which a flat-array bucket is promoted to chunks; <c>0</c> uses the default
+    /// <see cref="ArrayBucketMaxLength"/> (1,024). Raising this keeps larger buckets as compact flat
+    /// arrays — fewer <see cref="ChunkedImmutableList{T}"/> instances, so less per-instance overhead
+    /// (the retained-heap lever for issue #44) — at the cost of a larger whole-array copy per append
+    /// to a bucket in the widened range. <b>The value is a ceiling only:</b> it is always floored by
+    /// the byte-aware limit so a flat <c>TEntity[]</c> can never reach the LOH, whatever you pass.
+    /// Size it from your bucket-size distribution; the default is safe but conservative for
+    /// reference entities. Does not affect already-promoted buckets.
+    /// </param>
+    public MultiValueSnapshotTable(
+        int keyCapacityHint = 0, IEqualityComparer<TKey>? comparer = null, int maxArrayBucketElements = 0)
     {
         ArgumentOutOfRangeException.ThrowIfNegative(keyCapacityHint);
+        ArgumentOutOfRangeException.ThrowIfNegative(maxArrayBucketElements);
+        int ceiling = maxArrayBucketElements == 0 ? ArrayBucketMaxLength : maxArrayBucketElements;
+        _arrayBucketMaxCount = Math.Min(ceiling, Math.Max(1, ArrayBucketMaxBytes / Unsafe.SizeOf<TEntity>()));
         _comparer = comparer ?? EqualityComparer<TKey>.Default;
         _defaultComparer = typeof(TKey).IsValueType && ReferenceEquals(_comparer, EqualityComparer<TKey>.Default);
         int shardCount = (int)BitOperations.RoundUpToPowerOf2(
@@ -247,7 +268,7 @@ public sealed class MultiValueSnapshotTable<TKey, TEntity>
                         else
                         {
                             var bucket = existing as TEntity[] ?? EmptyBucket;
-                            if (bucket.Length + entities.Length > ArrayBucketMaxCount)
+                            if (bucket.Length + entities.Length > _arrayBucketMaxCount)
                             {
                                 // Promote: one final whole copy into sub-LOH chunks; O(chunk)
                                 // appends from here on.
@@ -403,9 +424,9 @@ public sealed class MultiValueSnapshotTable<TKey, TEntity>
         return copy;
     }
 
-    private static object MaterializeBucket(IReadOnlyList<TEntity> entities)
+    private object MaterializeBucket(IReadOnlyList<TEntity> entities)
     {
-        if (entities.Count <= ArrayBucketMaxCount)
+        if (entities.Count <= _arrayBucketMaxCount)
         {
             if (entities is TEntity[] source)
             {

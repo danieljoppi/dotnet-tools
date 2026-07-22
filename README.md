@@ -183,6 +183,14 @@ IReadOnlyList<Order> book = byInstrument.Lookup(instrumentId);  // wait-free, im
 > the entity inline instead of allocating a one-element array per change
 > ([`RESULTS.md` §17](benchmarks/RESULTS.md), issue #45).
 
+> **Tuning the array/chunked boundary (advanced).** Buckets stay as compact flat arrays up to
+> `maxArrayBucketElements` (default 1,024), then promote to chunks. If your reference-type buckets
+> cluster in the low thousands, raising this — `new MultiValueSnapshotTable<K,V>(maxArrayBucketElements: 8192)`
+> — keeps more of them flat, cutting per-`ChunkedImmutableList` overhead, at the cost of larger
+> whole-array copies per append in that range. It is a ceiling only: always floored by the byte
+> limit, so a flat array can never reach the LOH whatever you pass. Size it from your bucket-size
+> distribution; the default is safe but conservative (issue #44).
+
 Install from the packaged build (`dotnet pack src/DotnetTools.SnapshotCache`; CI uploads the
 `.nupkg` as an artifact on every merge request, and pushing a `v*` tag publishes a GitHub Release —
 see [`.github/workflows/release.yml`](.github/workflows/release.yml)).

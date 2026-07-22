@@ -62,7 +62,13 @@ single-entity-heavy and the alternative (a per-change one-element array) is stri
   reach the LOH even for wide value-type entities (a 1 KB struct promotes at ~82 elements instead of
   building a 1.1 MB array at 1,024). Byte-awareness only *tightens* the cap; it is a no-op for
   reference entities and narrow structs, which keep the 1,024 ceiling.
-- (open, issue #44) *Raising* the cap for small (reference) elements toward the LOH-safe ~10,000 to
-  reclaim per-`ChunkedImmutableList` overhead (the +11 GiB in the production A/B) is still deferred:
-  it trades memory for per-append copy cost and needs the production per-shared-key bucket-size
-  distribution to size, per ADR-0005. This ADR does not decide it.
+- (+) *Raising* the cap toward the LOH-safe limit (~10,500 elements for reference entities) to
+  reclaim per-`ChunkedImmutableList` overhead — the +11 GiB in the production A/B — is now an
+  **opt-in constructor knob** (`maxArrayBucketElements`), always floored by the byte-aware limit so
+  it cannot reach the LOH. This ships the *lever* without changing the default: per ADR-0005 the
+  library does not pick a higher global default on unproven grounds; the operator (who has the data)
+  raises it. Follows the existing `ChunkedImmutableList` chunk-size tuning precedent.
+- (open, issue #44) The *default* remains 1,024 for reference entities. Choosing a better global
+  default — or a self-tuning one — is still deferred: it trades retained memory for per-append copy
+  cost and needs the production per-shared-key bucket-size distribution (p50/p95/max entities per
+  key, and the count of keys in the 1k–10k band) to size. This ADR does not decide it.
