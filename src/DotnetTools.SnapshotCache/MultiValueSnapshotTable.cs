@@ -100,10 +100,27 @@ public readonly struct BucketChange<TKey, TEntity>
 public sealed class MultiValueSnapshotTable<TKey, TEntity>
     where TKey : notnull
 {
-    /// <summary>Bucket size at which the array representation is promoted to chunks. At 1,024
-    /// elements the last whole-array copy is ≤8 KB for reference entities — far below the LOH
-    /// bar — while larger buckets get O(chunk) appends. Buckets never demote.</summary>
+    /// <summary>Upper bound on the element count of a flat-array bucket before it is promoted to
+    /// chunks. At 1,024 elements the last whole-array copy is ≤8 KB for reference entities — far
+    /// below the LOH bar. For large <b>value-type</b> entities the <i>effective</i> cap is lower
+    /// (see <see cref="ArrayBucketMaxCount"/>) so the flat array itself never reaches the LOH.
+    /// Buckets never demote.</summary>
     public const int ArrayBucketMaxLength = 1024;
+
+    /// <summary>Bytes a flat-array bucket may occupy before promotion — kept below the 85,000-byte
+    /// LOH threshold with margin. The effective element cap is derived from this and the element
+    /// size (issue #44).</summary>
+    private const int ArrayBucketMaxBytes = 84_000;
+
+    /// <summary>The effective promotion cap in elements: <see cref="ArrayBucketMaxLength"/>, but
+    /// lowered for wide entities so a flat <c>TEntity[]</c> never reaches the LOH. For reference
+    /// entities (8-byte slots) this is 1,024; for a struct larger than ~82 bytes it drops below
+    /// 1,024 (e.g. a 1 KB struct promotes at ~82 elements, an ~82 KB array). Byte-awareness only
+    /// <i>tightens</i> the cap here — raising it for small elements to reclaim per-chunk overhead is
+    /// a separate, measured change (issue #44) that needs the production bucket-size distribution.
+    /// Computed once per closed generic type.</summary>
+    internal static readonly int ArrayBucketMaxCount =
+        Math.Min(ArrayBucketMaxLength, Math.Max(1, ArrayBucketMaxBytes / Unsafe.SizeOf<TEntity>()));
 
     private const int TargetKeysPerShard = 256;
     private const int MinShardCount = 8;
@@ -230,7 +247,7 @@ public sealed class MultiValueSnapshotTable<TKey, TEntity>
                         else
                         {
                             var bucket = existing as TEntity[] ?? EmptyBucket;
-                            if (bucket.Length + entities.Length > ArrayBucketMaxLength)
+                            if (bucket.Length + entities.Length > ArrayBucketMaxCount)
                             {
                                 // Promote: one final whole copy into sub-LOH chunks; O(chunk)
                                 // appends from here on.
@@ -388,7 +405,7 @@ public sealed class MultiValueSnapshotTable<TKey, TEntity>
 
     private static object MaterializeBucket(IReadOnlyList<TEntity> entities)
     {
-        if (entities.Count <= ArrayBucketMaxLength)
+        if (entities.Count <= ArrayBucketMaxCount)
         {
             if (entities is TEntity[] source)
             {

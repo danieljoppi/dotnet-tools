@@ -62,6 +62,12 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Byte-aware bucket promotion (`MultiValueSnapshotTable`, issue #44)** — the flat-array →
+  chunked promotion cap is now `min(1,024 elements, 84,000 bytes / sizeof(TEntity))`, so a flat
+  `TEntity[]` bucket can no longer reach the Large Object Heap for wide **value-type** entities
+  (previously a 1,024-element bucket of a ~1 KB struct built a 1.1 MB LOH array). No-op for
+  reference entities and narrow structs, which keep the 1,024-element ceiling. (Raising the cap for
+  small elements to reclaim per-chunk overhead remains a separate, measurement-gated change.)
 - Full-suite test flake: LOH guardrails read a process-global counter that parallel test
   allocation polluted — test parallelization is now disabled so the reading is clean.
 

@@ -57,6 +57,12 @@ single-entity-heavy and the alternative (a per-change one-element array) is stri
 - (+) A measured negative result (`ResetParallel`) is documented so it is not re-attempted blindly.
 - (−) One more overload and one wider struct field to maintain; `BucketChange`'s inline-vs-array
   append is a branch in the apply path (covered by fuzz-vs-model and a dedicated correctness test).
-- (open) The element-count promotion threshold (1,024) is still byte-blind (issue #44); making it
-  byte-aware is the remaining production-validation item and is blocked on entity-size + bucket-size
-  distribution data. This ADR does not decide it.
+- (+) The promotion threshold is now **byte-aware** (issue #44): the flat-array cap is
+  `min(1,024 elements, 84,000 bytes / sizeof(TEntity))`, so a flat `TEntity[]` bucket can no longer
+  reach the LOH even for wide value-type entities (a 1 KB struct promotes at ~82 elements instead of
+  building a 1.1 MB array at 1,024). Byte-awareness only *tightens* the cap; it is a no-op for
+  reference entities and narrow structs, which keep the 1,024 ceiling.
+- (open, issue #44) *Raising* the cap for small (reference) elements toward the LOH-safe ~10,000 to
+  reclaim per-`ChunkedImmutableList` overhead (the +11 GiB in the production A/B) is still deferred:
+  it trades memory for per-append copy cost and needs the production per-shared-key bucket-size
+  distribution to size, per ADR-0005. This ADR does not decide it.
